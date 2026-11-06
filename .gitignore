@@ -1,0 +1,15 @@
+/target/
+node_modules/
+.wrangler/
+.idea/
+.DS_Store
+*.png
+!docs/*.png
+
+# Secrets, wherever they are: never commit these.
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+.signing-secret
+.token
