@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Serverless Ray Tracer</title>
+<style>
+  :root {
+    --glass: rgba(12, 13, 17, 0.58); --glass-line: rgba(255, 255, 255, 0.12); --field: rgba(0, 0, 0, 0.35);
+    --text: #eef0f3; --muted: #a3a8b3; --accent: #8fb2f0; --ok: #8fd19e; --err: #f19494;
+    --user: rgba(143, 178, 240, 0.18);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: var(--text); }
+  [hidden] { display: none !important; }
+
+  /* The render is the page background. */
+  #c { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; display: block; z-index: 0; }
+
+  .panel { position: fixed; z-index: 1; background: var(--glass); border: 1px solid var(--glass-line);
+           border-radius: 14px; padding: 14px; backdrop-filter: blur(14px) saturate(140%);
+           -webkit-backdrop-filter: blur(14px) saturate(140%); box-shadow: 0 8px 32px rgba(0,0,0,.35);
+           transition: opacity .2s, transform .2s; }
+  body.hide-ui .panel, body.hide-ui .bar { opacity: 0; pointer-events: none; transform: translateY(4px); }
+
+  h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: .01em; }
+  h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
+  .row { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+  .row.three { grid-template-columns: 1.4fr 1fr 1fr; }
+  input[type=number], select { width: 100%; background: var(--field); color: var(--text); border: 1px solid var(--glass-line);
+           border-radius: 7px; padding: 7px 8px; font: inherit; font-size: 13px; font-variant-numeric: tabular-nums; }
+  textarea { width: 100%; resize: none; background: var(--field); color: var(--text);
+             border: 1px solid var(--glass-line); border-radius: 7px; padding: 10px; }
+  input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); outline-offset: 0; }
+  input:invalid { border-color: var(--err); }
+  button { background: var(--accent); color: #0b1020; border: 0; border-radius: 7px; padding: 8px 14px;
+           font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--field); color: var(--text); border: 1px solid var(--glass-line); font-weight: 500; }
+  button.stop { background: var(--field); color: var(--text); border: 1px solid var(--err); }
+  button:disabled { opacity: .45; cursor: default; }
+
+  /* Left: the shape chat (conversation, current script, prompt). */
+  #chat { top: 16px; left: 16px; bottom: 16px; width: 420px; max-width: calc(100vw - 32px);
+          display: flex; flex-direction: column; gap: 10px; }
+  .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  #new-chat { padding: 6px 10px; font-size: 12px; }
+  #log { flex: 1 1 auto; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+         padding-right: 2px; font-size: 13px; line-height: 1.45; }
+  .empty { color: var(--muted); margin: auto 0; text-align: center; padding: 0 16px; }
+  .msg { max-width: 92%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 3px; }
+  .msg.bot { align-self: flex-start; color: var(--muted); padding-left: 0; }
+  .msg.bot.ok { color: var(--text); } .msg.bot.err { color: var(--err); }
+  .msg.note { align-self: center; font-size: 11px; color: var(--muted); padding: 0; }
+
+  #script-box { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; min-height: 0; }
+  .script-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+  .script-head button { padding: 2px 8px; font-size: 11px; font-weight: 500; }
+  .script-head .grow { flex: 1; }
+  #edited { color: var(--accent); }
+  #shape { height: 220px; max-height: 40vh; resize: vertical;
+           font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+  #script-box.collapsed #shape { display: none; }
+
+  .composer { display: flex; flex-direction: column; gap: 8px; }
+  #prompt { height: 72px; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }
+  .composer-foot { display: flex; gap: 8px; align-items: end; }
+  .composer-foot label { flex: 1; }
+  #send { min-width: 76px; }
+
+  /* Right: render options and progress. */
+  #render-panel { top: 16px; right: 16px; width: 300px; max-width: calc(100vw - 32px);
+                  display: flex; flex-direction: column; gap: 10px; }
+  #render { width: 100%; padding: 10px 14px; font-size: 14px; }
+  #status-box { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; display: grid; gap: 3px;
+                border-top: 1px solid var(--glass-line); padding-top: 10px; }
+  #status-box b { color: var(--text); font-weight: 500; }
+  #status { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-weight: 600; font-size: 13px; }
+  #status.ok { color: var(--ok); } #status.err { color: var(--err); }
+  #run { font-size: 11px; word-break: break-all; }
+  .hint { font-size: 11px; color: var(--muted); }
+
+  #camera-panel { bottom: 20px; left: 50%; transform: translateX(-50%); padding: 10px; }
+  body.hide-ui #camera-panel { transform: translate(-50%, 4px); }
+  .pad { display: grid; grid-template-columns: repeat(3, 32px); grid-template-rows: repeat(3, 32px); gap: 4px; }
+  .pad button { padding: 0; width: 32px; height: 32px; font-size: 14px; background: var(--field);
+                color: var(--text); border: 1px solid var(--glass-line); font-weight: 500; }
+  .pad button:hover { border-color: var(--accent); }
+
+  /* Always visible, so the UI can be brought back. */
+  #toggle-ui { position: fixed; z-index: 3; right: 16px; bottom: 16px; background: var(--glass); color: var(--text);
+               border: 1px solid var(--glass-line); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+               font-weight: 500; opacity: .75; }
+  #toggle-ui:hover { opacity: 1; }
+  body.hide-ui #toggle-ui { opacity: .35; }
+  body.hide-ui #toggle-ui:hover { opacity: .9; }
+
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; height: 3px; z-index: 2; background: rgba(255,255,255,.08);
+         transition: opacity .2s; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; box-shadow: 0 0 8px var(--accent); }
+
+  @media (max-width: 900px) {
+    #render-panel { top: 8px; right: 8px; left: 8px; width: auto; max-width: none; padding: 10px; gap: 8px; }
+    #chat { top: auto; left: 8px; right: 8px; bottom: 60px; width: auto; max-width: none; height: 55vh; }
+    #camera-panel { display: none; }
+    #shape { height: 120px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+
+<section class="panel" id="chat" aria-label="Shape chat">
+  <div class="chat-head">
+    <h1>Serverless Ray Tracer</h1>
+    <button id="new-chat" class="secondary" type="button" title="Start over with a new shape">+ New chat</button>
+  </div>
+
+  <div id="log" aria-live="polite"></div>
+
+  <!-- The chat's current script; shown once there is one. Edits are kept when you ask for changes. -->
+  <div id="script-box" hidden>
+    <div class="script-head">
+      <span>Script</span><span id="edited" hidden>· edited</span>
+      <span class="grow"></span>
+      <button id="toggle-script" class="secondary" type="button">Hide</button>
+    </div>
+    <textarea id="shape" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Shape script"></textarea>
+  </div>
+
+  <div class="composer">
+    <textarea id="prompt" spellcheck="true" aria-label="Message"
+      placeholder="Describe a shape, e.g. a chess knight made of smooth blobs"></textarea>
+    <div class="composer-foot">
+      <div class="row" style="flex:1">
+        <label title="Which Claude model writes the shape script">Model
+          <select id="model">
+            <option value="claude-opus-5-5" selected>Claude Opus 5.5</option>
+            <option value="claude-sonnet-5-5">Claude Sonnet 5.5</option>
+            <option value="claude-haiku-5-5">Claude Haiku 5.5</option>
+            <option value="claude-fable-5-1">Claude Fable 5.1</option>
+          </select>
+        </label>
+        <label title="How much the model thinks before writing: lower is faster, higher handles harder shapes">Effort
+          <select id="effort">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="xhigh">Extra high</option>
+            <option value="max">Max</option>
+          </select>
+        </label>
+      </div>
+      <button id="send" type="button">Send</button>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="render-panel" aria-label="Render">
+  <h2>Render</h2>
+  <label>Quality
+    <select id="preset">
+      <option value="640x360,16,4">Preview</option>
+      <option value="1280x720,64,5" selected>HD</option>
+      <option value="1920x1080,128,6">Full HD</option>
+      <option value="3840x2160,256,8">4K</option>
+      <option value="">Custom</option>
+    </select>
+  </label>
+  <div class="row three">
+    <label>Resolution
+      <select id="resolution">
+        <option value="640x360">640×360</option>
+        <option value="1280x720">1280×720</option>
+        <option value="1920x1080">1920×1080</option>
+        <option value="2560x1440">2560×1440</option>
+        <option value="3840x2160">3840×2160</option>
+      </select>
+    </label>
+    <label title="Paths traced per pixel: more is less noisy, and proportionally slower">Samples
+      <input id="samples" type="number" min="1" max="4096" step="1" inputmode="numeric" />
+    </label>
+    <label title="How many times a path can bounce: more lights crevices and glass, and is slower">Bounces
+      <input id="bounces" type="number" min="0" max="16" step="1" inputmode="numeric" />
+    </label>
+  </div>
+  <button id="render" type="button" disabled title="Render the current script (⌘/Ctrl+Enter in the script)">Render</button>
+  <div id="status-box">
+    <span id="status">Nothing rendered yet</span>
+    <span>Tiles <b id="tiles">0 / 0</b> · Elapsed <b id="elapsed">0.0s</b></span>
+    <span id="run"></span>
+  </div>
+</section>
+
+<!-- Shown once there is a shape to orbit. -->
+<section class="panel" id="camera-panel" aria-label="Orbit camera" hidden>
+  <div class="pad">
+    <span></span><button type="button" data-cam="orbit-up" aria-label="Orbit up">↑</button><span></span>
+    <button type="button" data-cam="orbit-left" aria-label="Orbit left">←</button><span></span>
+    <button type="button" data-cam="orbit-right" aria-label="Orbit right">→</button>
+    <span></span><button type="button" data-cam="orbit-down" aria-label="Orbit down">↓</button><span></span>
+  </div>
+</section>
+
+<button id="toggle-ui" type="button" title="Hide or show the controls (H)">Hide UI</button>
+<div class="bar"><div id="progress"></div></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $('c'), ctx = canvas.getContext('2d');
+let request = null, timer = null; // request: the running render's AbortController (starting another aborts it)
+let running = null; // 'chat' (writing a script, then rendering it) | 'render' | null
+
+// Orbit camera (arrows orbit, +/- keys zoom); mirrors CameraParams in crates/scene/src/lib.rs (degrees, Z-up world).
+const DEFAULT_CAMERA = { target: [0, 0, 1.2], azimuth: -60, elevation: 18, distance: 9, fov: 39.6, aperture: 0 };
+const camera = structuredClone(DEFAULT_CAMERA);
+const ORBIT_STEP = 45, TILT_STEP = 20, ZOOM_FACTOR = 1.2; // degrees per arrow press
+
+/*
+ * The chat: the requests so far, and the script the model last wrote (to tell hand edits apart).
+ * Kept in this browser so a reload doesn't lose it.
+ */
+let chat = { history: [], generated: '', log: [] };
+let lastRendered = ''; // the script last sent to render, to decide whether to re-frame the camera
+const STORE = 'ray-tracer-chat';
+function save() {
+  try { localStorage.setItem(STORE, JSON.stringify({ ...chat, script: $('shape').value, camera })); } catch {}
+}
+function load() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(STORE) || 'null'); } catch {}
+  if (!saved || !Array.isArray(saved.history)) return;
+  chat = { history: saved.history, generated: saved.generated || '', log: saved.log || [] };
+  $('shape').value = saved.script || '';
+  if (saved.camera) Object.assign(camera, saved.camera);
+  chat.log.forEach((m) => addMessage(m.role, m.text, m.cls, false));
+}
+
+const script = () => $('shape').value;
+const hasScript = () => script().trim() !== '';
+
+/** Shows what depends on there being a script: the editor, the render button, the camera pad. */
+function refresh() {
+  const has = hasScript();
+  $('script-box').hidden = !has && !running;
+  $('camera-panel').hidden = !has;
+  $('edited').hidden = !has || script() === chat.generated;
+  $('render').disabled = (!has && running !== 'render') || running === 'chat';
+  $('prompt').placeholder = has
+    ? 'Ask for a change, e.g. make it gold and light it from the left'
+    : 'Describe a shape, e.g. a chess knight made of smooth blobs';
+  if (!$('log').children.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Describe a shape to start. Then keep chatting to refine it, or edit the script directly.';
+    $('log').append(empty);
+  }
+}
+
+/** Appends a chat message; returns a function that updates it in place. */
+function addMessage(role, text, cls = '', persist = true) {
+  $('log').querySelector('.empty')?.remove();
+  const el = document.createElement('div');
+  el.className = `msg ${role} ${cls}`;
+  el.textContent = text;
+  $('log').append(el);
+  $('log').scrollTop = $('log').scrollHeight;
+  const entry = { role, text, cls };
+  if (persist) { chat.log.push(entry); save(); }
+  return (text, cls = '') => {
+    el.textContent = text; el.className = `msg ${role} ${cls}`;
+    entry.text = text; entry.cls = cls;
+    $('log').scrollTop = $('log').scrollHeight;
+    if (persist) save();
+  };
+}
+
+/** "+3 −1 lines": lines added and removed, counting each distinct line as a multiset. */
+function diffStat(before, after) {
+  const count = (s) => s.split('\n').reduce((m, l) => m.set(l, (m.get(l) || 0) + 1), new Map());
+  const a = count(before), b = count(after);
+  let added = 0, removed = 0;
+  for (const [l, n] of b) added += Math.max(0, n - (a.get(l) || 0));
+  for (const [l, n] of a) removed += Math.max(0, n - (b.get(l) || 0));
+  return added || removed ? `+${added} −${removed} lines` : 'no changes';
+}
+
+function newChat() {
+  stop();
+  chat = { history: [], generated: '', log: [] };
+  $('shape').value = '';
+  $('log').replaceChildren();
+  Object.assign(camera, structuredClone(DEFAULT_CAMERA));
+  lastRendered = '';
+  save();
+  refresh();
+  $('prompt').focus();
+}
+
+function send() {
+  if (running === 'chat') { stop(); setStatus('Stopped (run cancelled)'); return; }
+  const description = $('prompt').value.trim();
+  if (!description) { $('prompt').focus(); return; }
+  const refining = hasScript();
+  if (refining && script() !== chat.generated) addMessage('note', 'Using your edited script');
+  addMessage('user', description);
+  $('prompt').value = '';
+  const job = { description, model: $('model').value, effort: $('effort').value };
+  if (refining) Object.assign(job, { script: script(), history: chat.history });
+  startRender(job, 'chat');
+}
+
+function moveCamera(action) {
+  if (!hasScript() || running === 'chat') return;
+  const c = camera;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  switch (action) {
+    case 'orbit-left': c.azimuth -= ORBIT_STEP; break;
+    case 'orbit-right': c.azimuth += ORBIT_STEP; break;
+    case 'orbit-up': c.elevation = clamp(c.elevation + TILT_STEP, -10, 85); break;
+    case 'orbit-down': c.elevation = clamp(c.elevation - TILT_STEP, -10, 85); break;
+    case 'zoom-in': c.distance = clamp(c.distance / ZOOM_FACTOR, 1, 60); break;
+    case 'zoom-out': c.distance = clamp(c.distance * ZOOM_FACTOR, 1, 60); break;
+  }
+  c.azimuth = ((c.azimuth + 540) % 360) - 180;
+  save();
+  // Batch rapid clicks into one render, keeping the user's view.
+  clearTimeout(moveCamera.debounce);
+  moveCamera.debounce = setTimeout(() => renderScript(false), 250);
+}
+
+/** Renders the script; the server aims the camera at the shape when `frame` (default: the script changed). */
+function renderScript(frame = script() !== lastRendered) {
+  if (!hasScript()) return;
+  if (running === 'render') { stop(); setStatus('Stopped (run cancelled)'); }
+  startRender({ shape: script(), frame }, 'render');
+}
+
+function toggleUi() {
+  const hidden = document.body.classList.toggle('hide-ui');
+  $('toggle-ui').textContent = hidden ? 'Show UI' : 'Hide UI';
+}
+$('toggle-ui').onclick = toggleUi;
+$('new-chat').onclick = newChat;
+$('send').onclick = send;
+$('prompt').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (running !== 'chat') send(); }
+});
+$('render').onclick = () => {
+  if (running === 'render') { stop(); setStatus('Stopped (run cancelled)'); return; }
+  renderScript();
+};
+$('shape').addEventListener('input', () => { refresh(); save(); });
+$('shape').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!running) renderScript(); }
+  if (e.key === 'Tab') { e.preventDefault(); e.target.setRangeText('  ', e.target.selectionStart, e.target.selectionEnd, 'end'); }
+});
+$('toggle-script').onclick = () => {
+  const collapsed = $('script-box').classList.toggle('collapsed');
+  $('toggle-script').textContent = collapsed ? 'Show' : 'Hide';
+};
+
+document.querySelectorAll('[data-cam]').forEach((b) => (b.onclick = () => moveCamera(b.dataset.cam)));
+const KEYS = { ArrowLeft: 'orbit-left', ArrowRight: 'orbit-right', ArrowUp: 'orbit-up', ArrowDown: 'orbit-down',
+  '+': 'zoom-in', '=': 'zoom-in', '-': 'zoom-out' };
+document.addEventListener('keydown', (e) => {
+  if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key.toLowerCase() === 'h') { toggleUi(); return; }
+  const action = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
+  if (action) { e.preventDefault(); moveCamera(action); }
+});
+
+// Quality: a preset fills resolution, samples and bounces; editing any of them makes it Custom.
+function applyPreset() {
+  const v = $('preset').value;
+  if (!v) return;
+  const [resolution, samples, bounces] = v.split(',');
+  $('resolution').value = resolution;
+  $('samples').value = samples;
+  $('bounces').value = bounces;
+}
+function matchPreset() {
+  const v = `${$('resolution').value},${$('samples').value},${$('bounces').value}`;
+  $('preset').value = [...$('preset').options].some((o) => o.value === v) ? v : '';
+}
+$('preset').onchange = applyPreset;
+['resolution', 'samples', 'bounces'].forEach((id) => $(id).addEventListener('input', matchPreset));
+applyPreset();
+
+/** The render settings, or an error message for an out-of-range field. */
+function quality() {
+  const [width, height] = $('resolution').value.split('x').map(Number);
+  const samples = Number($('samples').value), bounces = Number($('bounces').value);
+  if (!Number.isInteger(samples) || samples < 1 || samples > 4096) return 'Samples per pixel must be a whole number from 1 to 4096';
+  if (!Number.isInteger(bounces) || bounces < 0 || bounces > 16) return 'Bounces must be a whole number from 0 to 16';
+  return { width, height, samples, bounces };
+}
+
+function setStatus(text, cls = '') {
+  $('status').textContent = text;
+  $('status').className = cls;
+}
+
+function setRunning(kind) {
+  running = kind;
+  $('send').textContent = kind === 'chat' ? 'Stop' : 'Send';
+  $('send').classList.toggle('stop', kind === 'chat');
+  $('render').textContent = kind === 'render' ? 'Stop' : 'Render';
+  $('render').classList.toggle('stop', kind === 'render');
+  refresh();
+}
+
+let onStop = null; // undoes a half-finished chat turn, saying why
+function stop(why) {
+  request?.abort(); request = null;
+  clearInterval(timer);
+  const undo = onStop; onStop = null;
+  undo?.(why);
+  setRunning(null);
+}
+
+/**
+ * Runs one job: { shape } renders a script; { description } has the model write (or change) the
+ * script first, streaming it into the editor, then renders it. `kind` is 'chat' or 'render'.
+ */
+async function startRender(job, kind) {
+  const p = quality();
+  if (typeof p === 'string') { setStatus(p, 'err'); if (kind === 'chat') addMessage('bot', p, 'err'); return; }
+  stop();
+  if (canvas.width !== p.width || canvas.height !== p.height) {
+    canvas.width = p.width; canvas.height = p.height;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, p.width, p.height);
+  } else {
+    // Same size: dim the previous frame and paint new tiles over it.
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, p.width, p.height);
+  }
+
+  let tiles = 0, total = 0; // total arrives in the `render` message
+  const t0 = performance.now();
+  const tick = () => {
+    const s = (performance.now() - t0) / 1000;
+    $('elapsed').textContent = s.toFixed(1) + 's';
+    $('tiles').textContent = `${tiles} / ${total}`;
+    $('progress').style.width = (total ? 100 * tiles / total : 0) + '%';
+  };
+  timer = setInterval(tick, 100);
+  tick();
+
+  // A chat turn gets a reply in the log; the script it replaces comes back if the turn is cut short.
+  let reply = null, wrote = false;
+  if (kind === 'chat') {
+    reply = addMessage('bot', 'Starting…');
+    const before = script(), beforeGenerated = chat.generated;
+    const description = job.description;
+    onStop = (why = 'Stopped') => {
+      if (!wrote) { $('shape').value = before; chat.generated = beforeGenerated; reply(why, 'err'); }
+    };
+    job.onScript = (final) => {
+      wrote = true;
+      chat.generated = final;
+      chat.history.push(description);
+      reply(before.trim() ? `Updated the script · ${diffStat(before, final)}` : `Wrote the script · ${final.split('\n').length} lines`, 'ok');
+    };
+  } else {
+    lastRendered = job.shape;
+  }
+  const { onScript, ...body } = job;
+
+  setRunning(kind);
+  $('run').textContent = '';
+  setStatus('Starting…');
+
+  // The response is the render's event stream (Server-Sent Events), read until done or error.
+  const handlers = {};
+  const on = (type, fn) => (handlers[type] = fn);
+  const fail = (msg) => { tick(); stop(msg); setStatus('Error: ' + msg, 'err'); };
+  let scriptAttempt = 0;
+  on('start', (m) => ($('run').textContent = `run ${m.runId}`));
+  on('status', (m) => { setStatus(m.message); if (!wrote) reply?.(m.message); });
+  on('script-delta', (m) => {
+    // The model's script, streamed into the editor as it's written.
+    if (m.attempt !== scriptAttempt) { scriptAttempt = m.attempt; $('shape').value = ''; }
+    $('script-box').hidden = false;
+    $('shape').value += m.text;
+    $('shape').scrollTop = $('shape').scrollHeight;
+  });
+  on('script', (m) => { $('shape').value = m.script; refresh(); });
+  // The server framed the shape: orbit and zoom from there.
+  on('camera', (m) => { Object.assign(camera, m.camera); save(); });
+  on('render', (m) => {
+    total = m.tiles;
+    $('run').textContent = `${m.tileSize}px tiles · ` + $('run').textContent;
+    // Rendering starts once the script parsed: this chat turn's script is final.
+    if (onScript && !wrote) { lastRendered = script(); onScript(script()); refresh(); }
+  });
+  on('tile', (t) => {
+    const bin = atob(t.rgb);
+    const img = ctx.createImageData(t.w, t.h);
+    for (let px = 0; px < t.w * t.h; px++) {
+      img.data[px * 4] = bin.charCodeAt(px * 3);
+      img.data[px * 4 + 1] = bin.charCodeAt(px * 3 + 1);
+      img.data[px * 4 + 2] = bin.charCodeAt(px * 3 + 2);
+      img.data[px * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, t.x, t.y);
+    tiles++;
+  });
+  on('done', () => { tick(); onStop = null; stop(); setStatus('Done', 'ok'); });
+  on('error', (m) => fail(m.message));
+
+  const aborter = new AbortController();
+  request = aborter;
+  try {
+    const res = await fetch('/api/render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...p, camera, ...body }),
+      signal: aborter.signal,
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await readEvents(res.body, (type, data) => handlers[type]?.(data));
+    if (request === aborter) fail('Connection lost'); // ended without done or error
+  } catch (err) {
+    if (!aborter.signal.aborted) fail(err.message);
+  }
+}
+
+/** Reads a Server-Sent Events body, calling `emit(type, data)` for each event as it arrives. */
+async function readEvents(body, emit) {
+  const reader = body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += value;
+    let end;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      let type = 'message', data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) type = line.slice(7);
+        else if (line.startsWith('data: ')) data += line.slice(6);
+      }
+      if (data) emit(type, JSON.parse(data));
+    }
+  }
+}
+
+load();
+refresh();
+</script>
+</body>
+</html>

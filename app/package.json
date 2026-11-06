@@ -1,0 +1,22 @@
+{
+  "name": "serverless-ray-tracer-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
+    "@hatchet-dev/serverless": "^0.2.0",
+    "@hatchet-dev/typescript-sdk": "link:../../hatchet-core-subscribe/sdks/typescript/dist",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4",
+    "@types/node": "^26.6.6",
+    "typescript": "^5",
+    "wrangler": "^4"
+  }
+}

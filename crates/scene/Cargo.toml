@@ -1,0 +1,17 @@
+[package]
+name = "scene"
+version = "0.1.0"
+edition = "2021"
+description = "Scene (user-scripted Fidget shapes), orbit camera and tile renderer, built on the rpt path tracer"
+
+[dependencies]
+rpt = "0.2.1"
+# Implicit surfaces from user-written Rhai scripts (Rhai engine + evaluators; no JIT so it builds for wasm32).
+fidget = { version = "0.5.1", default-features = false, features = ["rhai"] }
+# The same Rhai Fidget's engine is built on, to read a script's list of parts.
+rhai = { version = "1.24", features = ["sync"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,15 @@
+[package]
+name = "ray-tile-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Cloudflare Worker adapter for the render-tile endpoint"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worker = "0.8"
+endpoint = { path = "../endpoint" }
+futures-util = { version = "0.3", default-features = false }
+# rand (via rpt) pulls in getrandom 0.2, which needs the `js` backend to compile for wasm32.
+getrandom = { version = "0.2", features = ["js"] }

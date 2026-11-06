@@ -1,0 +1,30 @@
+# The whole app as one Worker: the page (static assets), the render API, and the orchestration
+# workflows (describe-and-render, render-scene) as a Hatchet serverless endpoint under /hatchet.
+name = "serverless-ray-tracer-site"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+# nodejs_compat exposes secrets on process.env, where the Anthropic SDK reads ANTHROPIC_API_KEY.
+# enable_request_signal aborts request.signal when the browser disconnects.
+compatibility_flags = ["nodejs_compat", "enable_request_signal"]
+
+[assets]
+directory = "public"
+
+[limits]
+# Fan-out mostly waits on children (no CPU), but leave headroom for large renders.
+cpu_ms = 300000
+
+# The Durable Object the site used before renders became one streaming request.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RenderRoom"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["RenderRoom"]
+
+# Secrets (`wrangler secret put`; `.dev.vars` under `wrangler dev`):
+#   HATCHET_CLIENT_TOKEN    tenant API token: starting, cancelling and reading runs and streams
+#   HATCHET_SIGNING_SECRET  >= 32 chars, also given to Hatchet when registering the endpoint
+#   ANTHROPIC_API_KEY       shape-script generation
+
