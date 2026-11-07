@@ -50,6 +50,8 @@ export type DescribeInput = RenderSettings & {
   /** Refining: the current script's id (it may have been edited by hand) and the chat's earlier requests. */
   scriptId?: string;
   history?: string[];
+  /** Reference images for this turn, by id in the image store (scripts.ts). */
+  imageIds?: string[];
   /** Point the camera at the shape (a new chat); refinements keep the viewer's camera. */
   frame?: boolean;
   topic: string;

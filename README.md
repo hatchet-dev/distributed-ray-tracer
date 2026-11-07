@@ -91,6 +91,13 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   keeps it for the tenant's stream retention. The model can write at most 128K output tokens (about
   400 KB of script, less what it spends thinking), and refining a script sends it in the prompt,
   so the largest scripts have to be written or pasted by hand.
+- **Reference images.** A chat message can carry up to 6 images (attach, paste, or drop them on the
+  chat). The page shrinks each to what Claude reads (at most 2576 px on the long edge, as JPEG,
+  typically well under 1 MB) and uploads it to `POST /api/images` as soon as it is attached; the
+  Worker stores it like a script, on `image-<sha256>`, and the message carries the ids.
+  `describe-and-render` reads the images and puts them in the model's prompt, so they never pass
+  through Hatchet task inputs. Images apply to the message they were attached to: later messages
+  only mention that there were some, and the chat keeps small thumbnails in the browser.
 - **Shapes.** Fidget's sandboxed Rhai engine (bounded script steps and expression depth) turns the
   script into a math expression `f(x, y, z)`: negative inside, positive outside. `implicit.rs` marches
   rays along it using `|f|` as the step, refines hits by bisection, and takes normals from Fidget's

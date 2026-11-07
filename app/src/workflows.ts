@@ -1,6 +1,6 @@
 import { clientFromContext, hatchet } from '@hatchet-dev/serverless';
 import { ScriptWriter } from './describe';
-import { getScript, putScript } from './scripts';
+import { getImage, getScript, putScript } from './scripts';
 import {
   describe,
   type Camera,
@@ -192,9 +192,10 @@ export const describeAndRender = hatchet.task({
   executionTimeout: '60m',
   fn: async (input: DescribeInput, ctx) =>
     finishing(ctx, input.topic, true, async () => {
-      const { topic, description, model, effort, scriptId: currentId, history, frame: shouldFrame = true, ...settings } = input;
+      const { topic, description, model, effort, scriptId: currentId, history, imageIds = [], frame: shouldFrame = true, ...settings } = input;
       const current = currentId === undefined ? undefined : await getScript(currentId);
-      const writer = new ScriptWriter({ description, script: current, history }, model, effort);
+      const images = await Promise.all(imageIds.map(getImage));
+      const writer = new ScriptWriter({ description, script: current, history, images }, model, effort);
       const verb = current === undefined ? 'Generating' : 'Updating';
 
       let script = '';

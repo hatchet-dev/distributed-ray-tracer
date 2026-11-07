@@ -7,7 +7,7 @@
 import { cloudflare, type HatchetEnv } from '@hatchet-dev/serverless/cloudflare';
 import { HatchetCore } from '@hatchet-dev/typescript-sdk/core';
 import { MAX_SCRIPT_BYTES, parseJob, workflowFor, type Job } from './jobs';
-import { putScript } from './scripts';
+import { imageType, MAX_IMAGE_BYTES, putImage, putScript } from './scripts';
 import { describe, type StreamMessage } from './messages';
 import { workflows } from './workflows';
 
@@ -19,6 +19,7 @@ export default cloudflare<Env>({
   workflows,
   fetch: async (req, env, ctx) => {
     const url = new URL(req.url);
+    if (req.method === 'POST' && url.pathname === '/api/images') return uploadImage(req);
     if (req.method === 'POST' && url.pathname === '/api/render') {
       const raw = await req.text();
       if (raw.length > 2 * MAX_SCRIPT_BYTES) return new Response('request too large', { status: 413 });
@@ -34,6 +35,16 @@ export default cloudflare<Env>({
     return new Response('Not Found', { status: 404 });
   },
 });
+
+/** POST /api/images: stores a reference image (the raw bytes) and returns `{ id }` for a chat turn's `imageIds`. */
+async function uploadImage(req: Request): Promise<Response> {
+  if (Number(req.headers.get('Content-Length') ?? 0) > MAX_IMAGE_BYTES) return tooLarge();
+  const bytes = new Uint8Array(await req.arrayBuffer());
+  if (bytes.length > MAX_IMAGE_BYTES) return tooLarge();
+  if (!imageType(bytes)) return new Response('upload a PNG, JPEG, WebP or GIF image', { status: 415 });
+  return Response.json({ id: await putImage(bytes) });
+}
+const tooLarge = () => new Response(`images must be under ${MAX_IMAGE_BYTES} bytes`, { status: 413 });
 
 /** The job as its workflow's input: scripts are stored, and passed by id. */
 async function workflowInput(job: Job) {

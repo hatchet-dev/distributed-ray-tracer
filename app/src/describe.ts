@@ -221,25 +221,47 @@ export class ScriptWriter {
   private messages: Anthropic.Beta.BetaMessageParam[] = [];
 
   constructor(
-    private request: { description: string; script?: string; history?: string[] },
+    private request: {
+      description: string;
+      script?: string;
+      history?: string[];
+      /** Reference images the user attached to this request. */
+      images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; data: string }[];
+    },
     private model: Model = DEFAULT_MODEL,
     private effort: Effort = DEFAULT_EFFORT
   ) {}
 
   /** First attempt: a new script, or (given the current one) the requested change to it. */
   write(onText: (delta: string) => void) {
-    const { description, script, history = [] } = this.request;
-    let content = `Write a shape script for: ${description}`;
+    const { description, script, history = [], images = [] } = this.request;
+    let text = `Write a shape script for: ${description}`;
     if (script !== undefined) {
       const earlier = history.length
         ? `Earlier requests in this conversation, oldest first:\n${history.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n\n`
         : '';
-      content =
+      text =
         `${earlier}The current script (the user may have edited it by hand since):\n\n${script}\n\n` +
         `Change it as follows: ${description}\n\n` +
         'Keep everything the request does not ask to change. Reply with the full updated script.';
     }
-    this.messages.push({ role: 'user', content });
+    if (images.length) {
+      text +=
+        `\n\nThe ${images.length === 1 ? 'image above is a visual reference' : `${images.length} images above are visual references`} ` +
+        'from the user. Match the shapes, proportions and arrangement they show, and their colors, materials ' +
+        'and lighting unless the request says otherwise. Model it from the scene conventions (Z up, resting ' +
+        'on the floor), whatever the photo\'s viewpoint.';
+    }
+    this.messages.push({
+      role: 'user',
+      content: [
+        ...images.map((image) => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
+        })),
+        { type: 'text' as const, text },
+      ],
+    });
     return this.complete(onText);
   }
 

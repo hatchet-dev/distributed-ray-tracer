@@ -56,7 +56,8 @@
   .msg.bot.ok { color: var(--text); } .msg.bot.err { color: var(--err); }
   .msg.note { align-self: center; font-size: 11px; color: var(--muted); padding: 0; }
 
-  #script-box { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; min-height: 0; }
+  #script-box { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; min-height: 0;
+                border-top: 1px solid var(--glass-line); padding-top: 10px; }
   .script-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
   .script-head button { padding: 2px 8px; font-size: 11px; font-weight: 500; }
   .script-head .grow { flex: 1; }
@@ -70,6 +71,18 @@
   .composer-foot { display: flex; gap: 8px; align-items: end; }
   .composer-foot label { flex: 1; }
   #send { min-width: 76px; }
+  #attach { padding: 8px 10px; }
+  #attachments { display: flex; flex-wrap: wrap; gap: 6px; }
+  .thumb { position: relative; width: 56px; height: 56px; border-radius: 7px; overflow: hidden;
+           border: 1px solid var(--glass-line); background: var(--field); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb.uploading img { opacity: .45; }
+  .thumb.failed { border-color: var(--err); }
+  .thumb button { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0; border-radius: 50%;
+                  font-size: 12px; line-height: 18px; background: rgba(0,0,0,.65); color: var(--text); font-weight: 500; }
+  .msg-images { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  .msg-images img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; display: block; }
+  #chat.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
 
   /* Right: render options and progress. */
   #render-panel { top: 16px; right: 16px; width: 300px; max-width: calc(100vw - 32px);
@@ -121,17 +134,10 @@
 
   <div id="log" aria-live="polite"></div>
 
-  <!-- The chat's current script; shown once there is one. Edits are kept when you ask for changes. -->
-  <div id="script-box" hidden>
-    <div class="script-head">
-      <span>Script</span><span id="edited" hidden>· edited</span>
-      <span class="grow"></span>
-      <button id="toggle-script" class="secondary" type="button">Hide</button>
-    </div>
-    <textarea id="shape" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Shape script"></textarea>
-  </div>
-
   <div class="composer">
+    <!-- Reference images for the next message: attach, paste, or drop them on the chat. -->
+    <div id="attachments" hidden></div>
+    <input id="file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
     <textarea id="prompt" spellcheck="true" aria-label="Message"
       placeholder="Describe a shape, e.g. a chess knight made of smooth blobs"></textarea>
     <div class="composer-foot">
@@ -154,8 +160,19 @@
           </select>
         </label>
       </div>
+      <button id="attach" class="secondary" type="button" title="Attach reference images (or paste or drop them)" aria-label="Attach images">📎</button>
       <button id="send" type="button">Send</button>
     </div>
+  </div>
+
+  <!-- The chat's current script; shown once there is one. Edits are kept when you ask for changes. -->
+  <div id="script-box" hidden>
+    <div class="script-head">
+      <span>Script</span><span id="edited" hidden>· edited</span>
+      <span class="grow"></span>
+      <button id="toggle-script" class="secondary" type="button">Hide</button>
+    </div>
+    <textarea id="shape" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Shape script"></textarea>
   </div>
 </section>
 
@@ -235,7 +252,7 @@ function load() {
   chat = { history: saved.history, generated: saved.generated || '', log: saved.log || [] };
   $('shape').value = saved.script || '';
   if (saved.camera) Object.assign(camera, saved.camera);
-  chat.log.forEach((m) => addMessage(m.role, m.text, m.cls, false));
+  chat.log.forEach((m) => addMessage(m.role, m.text, m.cls, false, m.images));
 }
 
 const script = () => $('shape').value;
@@ -259,15 +276,21 @@ function refresh() {
   }
 }
 
-/** Appends a chat message; returns a function that updates it in place. */
-function addMessage(role, text, cls = '', persist = true) {
+/** Appends a chat message (with image thumbnails, as data URLs); returns a function that updates its text in place. */
+function addMessage(role, text, cls = '', persist = true, images = []) {
   $('log').querySelector('.empty')?.remove();
   const el = document.createElement('div');
   el.className = `msg ${role} ${cls}`;
   el.textContent = text;
+  if (images?.length) {
+    const strip = document.createElement('div');
+    strip.className = 'msg-images';
+    for (const src of images) { const img = new Image(); img.src = src; img.alt = 'Reference image'; strip.append(img); }
+    el.prepend(strip);
+  }
   $('log').append(el);
   $('log').scrollTop = $('log').scrollHeight;
-  const entry = { role, text, cls };
+  const entry = images?.length ? { role, text, cls, images } : { role, text, cls };
   if (persist) { chat.log.push(entry); save(); }
   return (text, cls = '') => {
     el.textContent = text; el.className = `msg ${role} ${cls}`;
@@ -287,8 +310,70 @@ function diffStat(before, after) {
   return added || removed ? `+${added} −${removed} lines` : 'no changes';
 }
 
+/*
+ * Reference images for the next message. Each is shrunk here to what Claude reads (at most 2576px on
+ * the long edge, as JPEG) and uploaded as soon as it's attached; the message carries their ids.
+ */
+const MAX_IMAGES = 6, MAX_EDGE = 2576, THUMB_EDGE = 128;
+let attachments = []; // { thumb: data URL, upload: Promise<id>, state: 'uploading' | 'done' | 'failed', error? }
+
+/** `source` drawn on a canvas at most `edge` px on its long side, over white (JPEG has no transparency). */
+function scaled(source, width, height, edge) {
+  const s = Math.min(1, edge / Math.max(width, height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(width * s));
+  c.height = Math.max(1, Math.round(height * s));
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(source, 0, 0, c.width, c.height);
+  return c;
+}
+
+async function uploadImage(blob) {
+  const res = await fetch('/api/images', { method: 'POST', headers: { 'Content-Type': blob.type }, body: blob });
+  if (!res.ok) throw new Error(await res.text());
+  return (await res.json()).id;
+}
+
+async function attach(files) {
+  for (const file of files) {
+    if (!file.type.startsWith('image/')) continue;
+    if (attachments.length >= MAX_IMAGES) { setStatus(`At most ${MAX_IMAGES} images per message`, 'err'); break; }
+    let bitmap;
+    try { bitmap = await createImageBitmap(file); } catch { setStatus(`Couldn't read ${file.name} as an image`, 'err'); continue; }
+    const full = scaled(bitmap, bitmap.width, bitmap.height, MAX_EDGE);
+    bitmap.close();
+    const item = { thumb: scaled(full, full.width, full.height, THUMB_EDGE).toDataURL('image/jpeg', 0.7), state: 'uploading' };
+    item.upload = new Promise((ok, no) => full.toBlob((b) => (b ? ok(b) : no(new Error('could not encode the image'))), 'image/jpeg', 0.9))
+      .then(uploadImage)
+      .then((id) => { item.state = 'done'; return id; }, (err) => { item.state = 'failed'; item.error = err.message; throw err; })
+      .finally(renderAttachments);
+    item.upload.catch(() => {}); // reported on send
+    attachments.push(item);
+    renderAttachments();
+  }
+}
+
+function renderAttachments() {
+  $('attachments').hidden = !attachments.length;
+  $('attachments').replaceChildren(...attachments.map((item) => {
+    const el = document.createElement('div');
+    el.className = `thumb ${item.state}`;
+    el.title = item.state === 'failed' ? `Upload failed: ${item.error}` : item.state === 'uploading' ? 'Uploading…' : 'Reference image';
+    const img = new Image(); img.src = item.thumb; img.alt = 'Reference image';
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.textContent = '×'; remove.setAttribute('aria-label', 'Remove image');
+    remove.onclick = () => { attachments = attachments.filter((a) => a !== item); renderAttachments(); };
+    el.append(img, remove);
+    return el;
+  }));
+}
+
 function newChat() {
   stop();
+  attachments = [];
+  renderAttachments();
   chat = { history: [], generated: '', log: [] };
   $('shape').value = '';
   $('log').replaceChildren();
@@ -299,15 +384,37 @@ function newChat() {
   $('prompt').focus();
 }
 
-function send() {
+let sending = false; // waiting for attached images to finish uploading
+async function send() {
   if (running === 'chat') { stop(); setStatus('Stopped (run cancelled)'); return; }
-  const description = $('prompt').value.trim();
-  if (!description) { $('prompt').focus(); return; }
+  if (sending) return;
+  const typed = $('prompt').value.trim();
+  const images = attachments;
+  if (!typed && !images.length) { $('prompt').focus(); return; }
+
+  // Wait for uploads; on a failure, leave the message in the composer to fix and resend.
+  let imageIds = [];
+  if (images.length) {
+    sending = true; $('send').disabled = true;
+    if (images.some((i) => i.state === 'uploading')) setStatus('Uploading images…');
+    try {
+      imageIds = await Promise.all(images.map((i) => i.upload));
+    } catch (err) {
+      setStatus(`Couldn't upload an image (remove it to send without it): ${err.message}`, 'err');
+      return;
+    } finally {
+      sending = false; $('send').disabled = false;
+    }
+  }
+
+  const description = typed || `Model what the reference ${images.length === 1 ? 'image shows' : 'images show'}`;
   const refining = hasScript();
   if (refining && script() !== chat.generated) addMessage('note', 'Using your edited script');
-  addMessage('user', description);
+  addMessage('user', typed, '', true, images.map((i) => i.thumb));
   $('prompt').value = '';
-  const job = { description, model: $('model').value, effort: $('effort').value };
+  attachments = [];
+  renderAttachments();
+  const job = { description, model: $('model').value, effort: $('effort').value, imageIds };
   if (refining) Object.assign(job, { script: script(), history: chat.history });
   startRender(job, 'chat');
 }
@@ -345,6 +452,22 @@ function toggleUi() {
 $('toggle-ui').onclick = toggleUi;
 $('new-chat').onclick = newChat;
 $('send').onclick = send;
+$('attach').onclick = () => $('file').click();
+$('file').onchange = () => { attach([...$('file').files]); $('file').value = ''; };
+$('prompt').addEventListener('paste', (e) => {
+  const images = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+  if (images.length) { e.preventDefault(); attach(images); }
+});
+// Drop images anywhere on the chat panel.
+const dragsFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+$('chat').addEventListener('dragover', (e) => { if (dragsFiles(e)) { e.preventDefault(); $('chat').classList.add('dropping'); } });
+$('chat').addEventListener('dragleave', (e) => { if (!$('chat').contains(e.relatedTarget)) $('chat').classList.remove('dropping'); });
+$('chat').addEventListener('drop', (e) => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  $('chat').classList.remove('dropping');
+  attach([...e.dataTransfer.files]);
+});
 $('prompt').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (running !== 'chat') send(); }
 });
@@ -453,7 +576,8 @@ async function startRender(job, kind) {
   if (kind === 'chat') {
     reply = addMessage('bot', 'Starting…');
     const before = script(), beforeGenerated = chat.generated;
-    const description = job.description;
+    // Images apply to their own turn; later turns only hear that there were some.
+    const description = (job.imageIds?.length ? `${job.description} (with reference images, not shown again)` : job.description).slice(0, 2000);
     onStop = (why = 'Stopped') => {
       if (!wrote) { $('shape').value = before; chat.generated = beforeGenerated; reply(why, 'err'); }
     };

@@ -1,5 +1,6 @@
 // Validation of a render request (POST /api/render).
 import { EFFORTS, MODELS, type Effort, type Model, type RenderSettings } from './messages.js';
+import { MAX_IMAGES } from './scripts.js';
 
 /** Bounds checked up front so a bad request doesn't spawn thousands of failing tiles. */
 const LIMITS = { width: [1, 7680], height: [1, 4320], samples: [1, 4096], bounces: [0, 16] } as const;
@@ -12,7 +13,7 @@ const MAX_HISTORY = 30;
 export type Job = RenderSettings &
   (
     | { shape: string; frame: boolean }
-    | { description: string; model: Model; effort: Effort; script?: string; history: string[]; frame: boolean }
+    | { description: string; model: Model; effort: Effort; script?: string; history: string[]; imageIds: string[]; frame: boolean }
   );
 
 /** The job described by a request body, or an error message. */
@@ -35,7 +36,10 @@ export function parseJob(body: Record<string, unknown>): Job | string {
     const { model = 'claude-opus-5-5', effort = 'medium' } = body;
     if (!MODELS.includes(model as Model)) return `model must be one of ${MODELS.join(', ')}`;
     if (!EFFORTS.includes(effort as Effort)) return `effort must be one of ${EFFORTS.join(', ')}`;
-    const { script, history = [] } = body;
+    const { script, history = [], imageIds = [] } = body;
+    if (!Array.isArray(imageIds) || imageIds.length > MAX_IMAGES || !imageIds.every((id) => typeof id === 'string' && /^[0-9a-f]{64}$/.test(id))) {
+      return `imageIds must be at most ${MAX_IMAGES} ids from POST /api/images`;
+    }
     if (script !== undefined && (typeof script !== 'string' || !script.trim())) return 'script must be a non-empty string';
     if (script !== undefined && tooBig(script)) return `script must be under ${MAX_SCRIPT_BYTES} bytes`;
     if (
@@ -52,6 +56,7 @@ export function parseJob(body: Record<string, unknown>): Job | string {
       effort: effort as Effort,
       ...(script !== undefined ? { script } : {}),
       history: history as string[],
+      imageIds: imageIds as string[],
       frame: script === undefined || body.frame === true,
     };
   }
