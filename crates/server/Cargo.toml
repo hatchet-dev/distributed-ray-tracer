@@ -9,8 +9,10 @@ name = "ray-tile-server"
 path = "src/main.rs"
 
 [dependencies]
-# Native code can be generated at runtime here (unlike on Workers): use Fidget's JIT.
-endpoint = { path = "../endpoint", features = ["jit"] }
+# Fidget's JIT (`features = ["jit"]`) is off: each tile JIT-compiles hundreds of per-cell
+# tapes, and with a dozen tiles at once their executable-memory mappings contend on the
+# process's memory-map lock, making tiles ~3x slower on Porter (measured) for a ~12% gain alone.
+endpoint = { path = "../endpoint" }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
