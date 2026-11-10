@@ -3,18 +3,29 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Serverless Ray Tracer</title>
+<title>Distributed Ray Tracer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,400;0,500;1,400&display=swap" />
 <style>
+  /* Hatchet's marketing palette (hatchet.run): navy and cyan, with blue, magenta and yellow accents. */
   :root {
-    --glass: rgba(12, 13, 17, 0.58); --glass-line: rgba(255, 255, 255, 0.12); --field: rgba(0, 0, 0, 0.35);
-    --text: #eef0f3; --muted: #a3a8b3; --accent: #8fb2f0; --ok: #8fd19e; --err: #f19494;
-    --user: rgba(143, 178, 240, 0.18);
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --navy: #0A1029; --navy-dark: #02081D; --cyan: #B8D9FF;
+    --blue: #3392FF; --magenta: #BC46DD; --yellow: #B8D41C;
+    --glass: rgba(2, 8, 29, 0.84); --glass-line: rgba(184, 217, 255, 0.16); --field: rgba(184, 217, 255, 0.05);
+    --corner: rgba(184, 217, 255, 0.7);
+    --text: var(--cyan); --muted: rgba(184, 217, 255, 0.58); --faint: rgba(184, 217, 255, 0.32);
+    --accent: var(--blue); --ok: var(--yellow); --err: #FF7A8A;
+    --user: rgba(51, 146, 255, 0.14);
+    --mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --control: 32px; /* the height of every input, select and button in a row */
+    font-family: var(--mono);
     color-scheme: dark;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: var(--text); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--navy-dark); color: var(--text); }
   [hidden] { display: none !important; }
+  ::selection { background: var(--blue); color: var(--navy-dark); }
 
   /* The render is the page background; the preview takes its place while previewing. */
   #c { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; display: block; z-index: 0; }
@@ -23,12 +34,13 @@
   body.previewing #preview { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0;
                              touch-action: none; }
   body.previewing #preview-labels { display: block; position: fixed; inset: 0; z-index: 0; pointer-events: none; }
-  .part-label { position: absolute; left: 0; top: 0; pointer-events: auto; padding: 2px 7px; font-size: 11px;
-                font-weight: 600; border-radius: 6px; background: rgba(12, 13, 17, 0.72); color: var(--text);
-                border: 1px solid var(--glass-line); white-space: nowrap; }
+
+  .part-label { position: absolute; left: 0; top: 0; pointer-events: auto; padding: 1px 6px; font: 500 11px/1.4 var(--mono);
+                text-transform: lowercase; border-radius: 2px; background: rgba(2, 8, 29, 0.8); color: var(--text);
+                border: 1px solid var(--glass-line); white-space: nowrap; cursor: pointer; }
   .part-label:hover { border-color: var(--accent); }
-  .part-label.selected { background: #ffd36b; color: #1b1606; border-color: #ffd36b; }
-  .part-label.fixed { color: var(--muted); font-weight: 500; cursor: default; }
+  .part-label.selected { background: var(--yellow); color: var(--navy-dark); border-color: var(--yellow); }
+  .part-label.fixed { color: var(--muted); font-weight: 400; cursor: default; }
   body.previewing #preview-note { display: block; position: fixed; z-index: 1; top: 60px; left: 50%;
                   transform: translateX(-50%); max-width: min(560px, calc(100vw - 32px)); font-size: 12px;
                   color: var(--muted); text-align: center; text-shadow: 0 1px 3px #000; pointer-events: none; }
@@ -36,105 +48,175 @@
   body.hide-ui #preview-note, body.hide-ui #preview-labels { opacity: 0; }
   #preview-tools { display: none; }
   body.previewing #preview-tools { display: flex; position: fixed; z-index: 1; top: 88px; left: 50%;
-                  transform: translateX(-50%); padding: 3px; gap: 2px; border-radius: 10px; }
-  #preview-tools button { background: transparent; color: var(--muted); font-weight: 500; padding: 5px 11px; font-size: 12px; }
-  #preview-tools button[aria-pressed=true] { background: var(--field); color: var(--text); }
+                  transform: translateX(-50%); padding: 3px; gap: 2px; }
   .part-label.camera { border-color: var(--accent); color: var(--accent); }
-  .part-label.camera.selected { background: var(--accent); color: #0b1020; }
+  .part-label.camera.selected { background: var(--accent); color: var(--navy-dark); }
   #view-switch { position: fixed; z-index: 1; top: 16px; left: 50%; transform: translateX(-50%); display: flex;
-                 padding: 3px; gap: 2px; border-radius: 10px; }
-  #view-switch button { background: transparent; color: var(--muted); font-weight: 500; padding: 6px 14px; }
-  #view-switch button[aria-pressed=true] { background: var(--field); color: var(--text); }
+                 padding: 3px; gap: 2px; }
   body.hide-ui #view-switch { transform: translate(-50%, 4px); }
 
-  .panel { position: fixed; z-index: 1; background: var(--glass); border: 1px solid var(--glass-line);
-           border-radius: 14px; padding: 14px; backdrop-filter: blur(14px) saturate(140%);
-           -webkit-backdrop-filter: blur(14px) saturate(140%); box-shadow: 0 8px 32px rgba(0,0,0,.35);
+  /* Segmented controls: the view switch and the preview tools. */
+  .seg button { background: transparent; color: var(--muted); padding: 5px 10px; }
+  .seg button::before { display: none; }
+  .seg button:hover { color: var(--text); }
+  .seg button[aria-pressed=true] { background: var(--cyan); color: var(--navy-dark); }
+
+  /* Panels: square, with ASCII-style corner brackets. */
+  .panel { position: fixed; z-index: 1; padding: 14px; border: 1px solid var(--glass-line);
+           background:
+             linear-gradient(var(--corner), var(--corner)) top left / 9px 1px,
+             linear-gradient(var(--corner), var(--corner)) top left / 1px 9px,
+             linear-gradient(var(--corner), var(--corner)) top right / 9px 1px,
+             linear-gradient(var(--corner), var(--corner)) top right / 1px 9px,
+             linear-gradient(var(--corner), var(--corner)) bottom left / 9px 1px,
+             linear-gradient(var(--corner), var(--corner)) bottom left / 1px 9px,
+             linear-gradient(var(--corner), var(--corner)) bottom right / 9px 1px,
+             linear-gradient(var(--corner), var(--corner)) bottom right / 1px 9px,
+             var(--glass);
+           background-repeat: no-repeat;
+           backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
            transition: opacity .2s, transform .2s; }
   body.hide-ui .panel, body.hide-ui .bar { opacity: 0; pointer-events: none; transform: translateY(4px); }
 
-  h1 { font-size: 16px; font-weight: 650; margin: 0; letter-spacing: .01em; }
-  h2 { font-size: 13px; font-weight: 600; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); }
+  h1 { font-size: 13px; font-weight: 500; margin: 0; letter-spacing: .08em; text-transform: uppercase; }
+  h1 .mark { color: var(--accent); letter-spacing: 0; margin-right: 6px; }
+  h2 { font-size: 11px; font-weight: 500; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+  h2::before { content: "// "; color: var(--faint); }
+  label { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 10px; line-height: 12px;
+          color: var(--muted); text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+  .row { align-items: end; }
   .row { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
   .row.three { grid-template-columns: 1.4fr 1fr 1fr; }
-  input[type=number], select { width: 100%; background: var(--field); color: var(--text); border: 1px solid var(--glass-line);
-           border-radius: 7px; padding: 7px 8px; font: inherit; font-size: 13px; font-variant-numeric: tabular-nums; }
-  textarea { width: 100%; resize: none; background: var(--field); color: var(--text);
-             border: 1px solid var(--glass-line); border-radius: 7px; padding: 10px; }
+  input[type=number], select { width: 100%; height: var(--control); margin: 0; background: var(--field); color: var(--text);
+           border: 1px solid var(--glass-line); border-radius: 2px; padding: 0 10px; font: 12px/1 var(--mono);
+           font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
+  input[type=number] { appearance: textfield; -moz-appearance: textfield; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  select { appearance: none; -webkit-appearance: none; padding: 0 22px 0 9px; text-overflow: ellipsis; cursor: pointer;
+           background: var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23B8D9FF' stroke-width='1.3'/%3E%3C/svg%3E") no-repeat right 8px center; }
+  select option { background: var(--navy); }
+  textarea { display: block; width: 100%; margin: 0; resize: none; background: var(--field); color: var(--text);
+             border: 1px solid var(--glass-line); border-radius: 2px; padding: 10px 12px; }
+  /* Scrollbars that show there is more, in the palette. */
+  #log, textarea { scrollbar-width: thin; scrollbar-color: rgba(184, 217, 255, 0.28) transparent; }
+  textarea::placeholder { color: var(--faint); }
   input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); outline-offset: 0; }
   input:invalid { border-color: var(--err); }
-  button { background: var(--accent); color: #0b1020; border: 0; border-radius: 7px; padding: 8px 14px;
-           font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
-  button.secondary { background: var(--field); color: var(--text); border: 1px solid var(--glass-line); font-weight: 500; }
-  button.stop { background: var(--field); color: var(--text); border: 1px solid var(--err); }
-  button:disabled { opacity: .45; cursor: default; }
+
+  /* Buttons, as on hatchet.run: small caps mono on a faint fill; the primary one leads with a square. */
+  button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; margin: 0;
+           background: var(--cyan); color: var(--navy-dark); border: 0; border-radius: 2px; padding: 7px 12px;
+           font: 500 11px/1.2 var(--mono); text-transform: uppercase; letter-spacing: .08em; cursor: pointer;
+           white-space: nowrap; transition: background .15s, color .15s; }
+  button::before { content: ""; width: 7px; height: 7px; background: currentColor; flex: none; }
+  button:hover { background: #fff; }
+  button.secondary { background: rgba(184, 217, 255, 0.08); color: var(--text); }
+  button.secondary::before { display: none; }
+  button.secondary:hover { background: rgba(184, 217, 255, 0.16); }
+  button.stop { background: transparent; color: var(--err); box-shadow: inset 0 0 0 1px var(--err); }
+  button.link { background: none; padding: 0; color: var(--muted); text-transform: none; letter-spacing: 0;
+                font-size: 12px; font-weight: 400; }
+  button.link::before { display: none; }
+  button.link:hover { background: none; color: var(--text); }
+  button:disabled { opacity: .4; cursor: default; }
+  button:disabled:hover { background: var(--cyan); }
+  button.secondary:disabled:hover { background: rgba(184, 217, 255, 0.08); }
+  button:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
   /* Left: the shape chat (conversation, current script, prompt). */
   #chat { top: 16px; left: 16px; bottom: 16px; width: 420px; max-width: calc(100vw - 32px);
           display: flex; flex-direction: column; gap: 10px; }
-  .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  #new-chat { padding: 6px 10px; font-size: 12px; }
+  .chat-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .title { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; padding-top: 2px; }
+  #about-open { justify-content: flex-start; gap: 6px; margin-bottom: 2px; }
+  #about-open::before { content: "[?]"; display: inline; width: auto; height: auto; background: none; color: var(--accent); }
   #log { flex: 1 1 auto; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
-         padding-right: 2px; font-size: 13px; line-height: 1.45; }
-  .empty { color: var(--muted); margin: auto 0; text-align: center; padding: 0 16px; }
-  .msg { max-width: 92%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .msg.user { align-self: flex-end; background: var(--user); border-bottom-right-radius: 3px; }
+         padding-right: 2px; font-size: 12.5px; line-height: 1.55; border-top: 1px dashed var(--glass-line); padding-top: 10px; }
+  .empty { color: var(--faint); margin: auto 0; text-align: center; padding: 0 16px; white-space: pre; line-height: 1.25;
+           font-size: 11px; }
+  .empty p { white-space: normal; line-height: 1.55; font-size: 12px; color: var(--muted); margin: 12px 0 0; }
+  .msg { max-width: 92%; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: var(--user); border-left: 2px solid var(--accent); }
   .msg.bot { align-self: flex-start; color: var(--muted); padding-left: 0; }
-  .msg.bot.ok { color: var(--text); } .msg.bot.err { color: var(--err); }
+  .msg.bot::before { content: "> "; color: var(--faint); }
+  .msg.bot.ok { color: var(--text); } .msg.bot.ok::before { color: var(--ok); }
+  .msg.bot.err { color: var(--err); }
   .msg.note { align-self: center; font-size: 11px; color: var(--muted); padding: 0; }
 
   #script-box { display: flex; flex-direction: column; gap: 6px; flex: 0 1 auto; min-height: 0;
-                border-top: 1px solid var(--glass-line); padding-top: 10px; }
-  .script-head { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
-  .script-head button { padding: 2px 8px; font-size: 11px; font-weight: 500; }
+                border-top: 1px dashed var(--glass-line); padding-top: 10px; }
+  .script-head { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--muted);
+                 text-transform: uppercase; letter-spacing: .1em; }
+  .script-head button { height: 24px !important; padding: 0 8px; font-size: 10px; }
   .script-head .grow { flex: 1; }
   #edited { color: var(--accent); }
-  #shape { height: 220px; max-height: 40vh; resize: vertical;
-           font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+  #shape { height: 220px; max-height: 40vh; resize: vertical; font: 12px/18px var(--mono); tab-size: 2; }
   #script-box.collapsed #shape { display: none; }
 
   .composer { display: flex; flex-direction: column; gap: 8px; }
-  #prompt { height: 72px; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }
-  .composer-foot { display: flex; gap: 8px; align-items: end; }
-  .composer-foot label { flex: 1; }
-  #send { min-width: 76px; }
-  #attach { padding: 8px 10px; }
+  #prompt { font: 13px/20px var(--mono); min-height: calc(3 * 20px + 22px); max-height: calc(8 * 20px + 22px); overflow-y: auto; }
+  .composer-foot { display: grid; grid-template-columns: minmax(0, 1.22fr) minmax(0, 1fr) auto auto; gap: 8px; align-items: end; }
+  .composer-foot button, #render-panel button, .script-head button { height: var(--control); }
+  #send { min-width: 70px; }
   #attachments { display: flex; flex-wrap: wrap; gap: 6px; }
-  .thumb { position: relative; width: 56px; height: 56px; border-radius: 7px; overflow: hidden;
+  .thumb { position: relative; width: 56px; height: 56px; overflow: hidden;
            border: 1px solid var(--glass-line); background: var(--field); }
   .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .thumb.uploading img { opacity: .45; }
   .thumb.failed { border-color: var(--err); }
-  .thumb button { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0; border-radius: 50%;
-                  font-size: 12px; line-height: 18px; background: rgba(0,0,0,.65); color: var(--text); font-weight: 500; }
+  .thumb button { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; padding: 0;
+                  font-size: 11px; line-height: 18px; background: rgba(2, 8, 29, .8); color: var(--text); }
+  .thumb button::before { display: none; }
   .msg-images { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
-  .msg-images img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; display: block; }
-  #chat.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
+  .msg-images img { width: 64px; height: 64px; object-fit: cover; display: block; }
+  #chat.dropping { outline: 1px dashed var(--accent); outline-offset: -6px; }
 
   /* Right: render options and progress. */
   #render-panel { top: 16px; right: 16px; width: 300px; max-width: calc(100vw - 32px);
                   display: flex; flex-direction: column; gap: 10px; }
-  #render { width: 100%; padding: 10px 14px; font-size: 14px; }
+  #render-panel #render { width: 100%; height: 38px; font-size: 12px; }
   #download { width: 100%; margin-top: -4px; }
-  #status-box { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; display: grid; gap: 3px;
-                border-top: 1px solid var(--glass-line); padding-top: 10px; }
+  #status-box { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; display: grid; gap: 4px;
+                border-top: 1px dashed var(--glass-line); padding-top: 10px; }
   #status-box b { color: var(--text); font-weight: 500; }
-  #status { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-weight: 600; font-size: 13px; }
+  #status { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-weight: 500; font-size: 12px; }
+  #status::before { content: "$ "; color: var(--faint); }
   #status.ok { color: var(--ok); } #status.err { color: var(--err); }
-  #run { font-size: 11px; word-break: break-all; }
+  #meter { color: var(--accent); white-space: pre; letter-spacing: -0.02em; overflow: hidden; }
+  #run { font-size: 10px; word-break: break-all; color: var(--faint); }
 
   /* Always visible, so the UI can be brought back. */
   #toggle-ui { position: fixed; z-index: 3; right: 16px; bottom: 16px; background: var(--glass); color: var(--text);
-               border: 1px solid var(--glass-line); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-               font-weight: 500; opacity: .75; }
-  #toggle-ui:hover { opacity: 1; }
+               box-shadow: inset 0 0 0 1px var(--glass-line); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+               opacity: .8; }
+  #toggle-ui::before { display: none; }
+  #toggle-ui:hover { opacity: 1; background: var(--glass); }
   body.hide-ui #toggle-ui { opacity: .35; }
   body.hide-ui #toggle-ui:hover { opacity: .9; }
 
-  .bar { position: fixed; left: 0; right: 0; bottom: 0; height: 3px; z-index: 2; background: rgba(255,255,255,.08);
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; height: 2px; z-index: 2; background: rgba(184, 217, 255, .08);
          transition: opacity .2s; }
   .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; box-shadow: 0 0 8px var(--accent); }
+
+  /* "What is this?" */
+  #about { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 22px 24px; color: var(--text);
+           font: 13px/1.6 var(--mono); position: fixed; overflow: auto; }
+  #about::backdrop { background: rgba(2, 8, 29, 0.72); backdrop-filter: blur(3px); }
+  #about h1 { font-size: 11px; font-weight: 500; margin: 0 0 14px; color: var(--muted); text-transform: uppercase;
+              letter-spacing: .1em; }
+  #about h1::before { content: "// "; color: var(--faint); }
+  #about h2, #about h3 { font-size: 13px; font-weight: 500; margin: 18px 0 8px; color: var(--text); }
+  #about h2::before, #about h3::before { content: none; }
+  #about p, #about li { margin: 0 0 12px; color: var(--muted); }
+  #about ul, #about ol { margin: 0 0 12px; padding-left: 20px; }
+  #about code { font: inherit; color: var(--text); }
+  #about-body > p:last-child { margin: 18px 0 0; padding-top: 14px; border-top: 1px dashed var(--glass-line); }
+  #about p strong { color: var(--text); font-weight: 500; }
+  #about pre { margin: 4px 0 16px; padding: 12px; font: 11px/1.35 var(--mono); color: var(--cyan); overflow-x: auto;
+               background: rgba(184, 217, 255, 0.04); border: 1px dashed var(--glass-line); }
+  #about a { color: var(--accent); text-decoration: none; border-bottom: 1px solid currentColor; }
+  #about a:hover { color: var(--cyan); }
+  #about-close { position: absolute; top: 12px; right: 12px; }
 
   @media (max-width: 900px) {
     #render-panel { top: 8px; right: 8px; left: 8px; width: auto; max-width: none; padding: 10px; gap: 8px; }
@@ -152,19 +234,22 @@
 <canvas id="preview"></canvas>
 <div id="preview-labels"></div>
 <div id="preview-note"></div>
-<div class="panel" id="preview-tools" role="toolbar" aria-label="Preview tools">
+<div class="panel seg" id="preview-tools" role="toolbar" aria-label="Preview tools">
   <button type="button" data-tool="look" title="See exactly what the render will frame (C)">Look through camera</button>
   <button type="button" data-tool="translate" title="Move the camera (W); click the camera first">Move</button>
   <button type="button" data-tool="rotate" title="Turn the camera (E); click the camera first">Turn</button>
 </div>
-<div class="panel" id="view-switch" role="group" aria-label="View" hidden>
+<div class="panel seg" id="view-switch" role="group" aria-label="View" hidden>
   <button type="button" data-view="preview" title="Live preview: move labelled parts (P)">Preview</button>
   <button type="button" data-view="render" title="The rendered image (P)">Render</button>
 </div>
 
 <section class="panel" id="chat" aria-label="Shape chat">
   <div class="chat-head">
-    <h1>Serverless Ray Tracer</h1>
+    <div class="title">
+      <h1><span class="mark" aria-hidden="true">▚▞</span>Distributed Ray Tracer</h1>
+      <button id="about-open" class="link" type="button" aria-haspopup="dialog">What is this?</button>
+    </div>
     <button id="new-chat" class="secondary" type="button" title="Start over with a new shape">+ New chat</button>
   </div>
 
@@ -177,24 +262,22 @@
     <textarea id="prompt" spellcheck="true" aria-label="Message"
       placeholder="Describe a shape, e.g. a chess knight made of smooth blobs"></textarea>
     <div class="composer-foot">
-      <div class="row" style="flex:1">
-        <label title="Which model writes the shape script">Model
-          <select id="model">
-            <option value="gpt-5.6-sol" selected>GPT-5.6 Sol</option>
-            <option value="gpt-5.6-terra">GPT-5.6 Terra</option>
-            <option value="gpt-5.6-luna">GPT-5.6 Luna</option>
-          </select>
-        </label>
-        <label title="How much the model thinks before writing: lower is faster, higher handles harder shapes">Effort
-          <select id="effort">
-            <option value="low">Low</option>
-            <option value="medium" selected>Medium</option>
-            <option value="high">High</option>
-            <option value="xhigh">Extra high</option>
-          </select>
-        </label>
-      </div>
-      <button id="attach" class="secondary" type="button" title="Attach reference images (or paste or drop them)" aria-label="Attach images">📎</button>
+      <label title="Which model writes the shape script">Model
+        <select id="model">
+          <option value="gpt-5.6-sol" selected>GPT-5.6 Sol</option>
+          <option value="gpt-5.6-terra">GPT-5.6 Terra</option>
+          <option value="gpt-5.6-luna">GPT-5.6 Luna</option>
+        </select>
+      </label>
+      <label title="How much the model thinks before writing: lower is faster, higher handles harder shapes">Effort
+        <select id="effort">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="xhigh">Extra high</option>
+        </select>
+      </label>
+      <button id="attach" class="secondary" type="button" title="Attach reference images (or paste or drop them)" aria-label="Attach images">+ Img</button>
       <button id="send" type="button">Send</button>
     </div>
   </div>
@@ -231,7 +314,7 @@
         <option value="3840x2160">3840×2160</option>
       </select>
     </label>
-    <label title="Most paths traced per pixel: smooth areas stop early once their noise is below what 8-bit color shows; noisy areas (edges, soft shadows, glass) use up to this many">Max samples
+    <label title="Max samples: the most paths traced per pixel. Smooth areas stop early once their noise is below what 8-bit color shows; noisy areas (edges, soft shadows, glass) use up to this many">Samples
       <input id="samples" type="number" min="1" max="4096" step="1" inputmode="numeric" />
     </label>
     <label title="How many times a path can bounce: more lights crevices and glass, and is slower">Bounces
@@ -242,6 +325,7 @@
   <button id="download" class="secondary" type="button" disabled title="Save the image as a PNG at full resolution">Download PNG</button>
   <div id="status-box">
     <span id="status">Nothing rendered yet</span>
+    <span id="meter" aria-hidden="true"></span>
     <span>Tiles <b id="tiles">0 / 0</b> · Elapsed <b id="elapsed">0.0s</b></span>
     <span id="run"></span>
   </div>
@@ -249,6 +333,12 @@
 
 <button id="toggle-ui" type="button" title="Hide or show the controls (H)">Hide UI</button>
 <div class="bar"><div id="progress"></div></div>
+
+<!-- "What is this?": the text is copy.md, loaded when the modal opens. -->
+<dialog id="about" class="panel" aria-label="What is this?">
+  <button id="about-close" class="secondary" type="button" aria-label="Close">Esc</button>
+  <div id="about-body"></div>
+</dialog>
 <script>
 const $ = (id) => document.getElementById(id);
 const canvas = $('c'), ctx = canvas.getContext('2d');
@@ -338,12 +428,18 @@ function refresh() {
   if (!$('log').children.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = 'Describe a shape to start. Then keep chatting to refine it, or edit the script directly.';
+    // A render in progress, as tiles: done, in flight, and queued.
+    empty.textContent = ['┌──┬──┬──┬──┬──┐', '│▓▓│▓▓│▓▓│▒▒│░░│', '├──┼──┼──┼──┼──┤', '│▓▓│▒▒│░░│  │  │', '└──┴──┴──┴──┴──┘'].join('\n');
+    const hint = document.createElement('p');
+    hint.textContent = 'Describe a shape to start. Then keep chatting to refine it, or edit the script directly.';
+    empty.append(hint);
     $('log').append(empty);
   }
 }
 
 /** Appends a chat message (with image thumbnails, as data URLs); returns a function that updates its text in place. */
+/** Whether the log is scrolled to (near) its end: new messages then keep it there. */
+const atBottom = () => { const l = $('log'); return l.scrollHeight - l.scrollTop - l.clientHeight < 40; };
 function addMessage(role, text, cls = '', persist = true, images = []) {
   $('log').querySelector('.empty')?.remove();
   const el = document.createElement('div');
@@ -355,14 +451,16 @@ function addMessage(role, text, cls = '', persist = true, images = []) {
     for (const src of images) { const img = new Image(); img.src = src; img.alt = 'Reference image'; strip.append(img); }
     el.prepend(strip);
   }
+  const follow = atBottom();
   $('log').append(el);
-  $('log').scrollTop = $('log').scrollHeight;
+  if (follow) $('log').scrollTop = $('log').scrollHeight;
   const entry = images?.length ? { role, text, cls, images } : { role, text, cls };
   if (persist) { chat.log.push(entry); save(); }
   return (text, cls = '') => {
+    const follow = atBottom();
     el.textContent = text; el.className = `msg ${role} ${cls}`;
     entry.text = text; entry.cls = cls;
-    $('log').scrollTop = $('log').scrollHeight;
+    if (follow) $('log').scrollTop = $('log').scrollHeight;
     if (persist) save();
   };
 }
@@ -481,7 +579,7 @@ async function send() {
   const refining = hasScript();
   if (refining && script() !== chat.generated) addMessage('note', 'Using your edited script');
   addMessage('user', typed, '', true, images.map((i) => i.thumb));
-  $('prompt').value = '';
+  $('prompt').value = ''; fitPrompt();
   attachments = [];
   renderAttachments();
   const job = { description, model: $('model').value, effort: $('effort').value, imageIds };
@@ -522,6 +620,12 @@ $('chat').addEventListener('drop', (e) => {
   $('chat').classList.remove('dropping');
   attach([...e.dataTransfer.files]);
 });
+function fitPrompt() {
+  const p = $('prompt');
+  p.style.height = 'auto';
+  p.style.height = p.scrollHeight + 2 + 'px'; // + the borders
+}
+$('prompt').addEventListener('input', fitPrompt);
 $('prompt').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (running !== 'chat') send(); }
 });
@@ -541,8 +645,32 @@ $('toggle-script').onclick = () => {
   $('toggle-script').textContent = collapsed ? 'Show' : 'Hide';
 };
 
+// "What is this?": a modal; Esc or a click outside it closes it.
+// The text is copy.md (Markdown), fetched each time it opens, so edits show on the next open.
+async function openAbout() {
+  $('about').showModal();
+  try {
+    const [res, { marked }] = await Promise.all([
+      fetch('copy.md', { cache: 'no-cache' }),
+      import('https://cdn.jsdelivr.net/npm/marked@15.0.7/lib/marked.esm.js'),
+    ]);
+    if (!res.ok) throw new Error(`copy.md: ${res.status}`);
+    $('about-body').innerHTML = marked.parse(await res.text());
+    $('about-body').querySelectorAll('a[href^="http"]').forEach((a) => { a.target = '_blank'; a.rel = 'noopener'; });
+  } catch (err) {
+    $('about-body').textContent = `Couldn't load the description (${err.message}).`;
+  }
+}
+$('about-open').onclick = openAbout;
+$('about-close').onclick = () => $('about').close();
+$('about').addEventListener('click', (e) => {
+  const r = $('about').getBoundingClientRect();
+  if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) $('about').close();
+});
+
 document.addEventListener('keydown', (e) => {
-  if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey || $('about').open) return;
+  if (e.key === '?') { openAbout(); return; }
   if (e.key.toLowerCase() === 'h') { toggleUi(); return; }
   if (e.key.toLowerCase() === 'p' && hasScript()) showView(view === 'preview' ? 'render' : 'preview');
 });
@@ -572,6 +700,13 @@ function quality() {
   if (!Number.isInteger(bounces) || bounces < 0 || bounces > 16) return 'Bounces must be a whole number from 0 to 16';
   return { width, height, samples, bounces };
 }
+
+/** Progress as a text bar: [██████░░░░░░]  50%. */
+function meter(f) {
+  const cells = 26, done = Math.round(f * cells);
+  return `[${'█'.repeat(done)}${'░'.repeat(cells - done)}] ${String(Math.round(f * 100)).padStart(3)}%`;
+}
+$('meter').textContent = meter(0);
 
 function setStatus(text, cls = '') {
   $('status').textContent = text;
@@ -678,6 +813,7 @@ async function follow({ kind, turn, width, height, startedAt, connect, resumed =
     $('elapsed').textContent = s.toFixed(1) + 's';
     $('tiles').textContent = `${tiles} / ${total}`;
     $('progress').style.width = (total ? 100 * tiles / total : 0) + '%';
+    $('meter').textContent = meter(total ? tiles / total : 0);
   };
   timer = setInterval(tick, 100);
   tick();
