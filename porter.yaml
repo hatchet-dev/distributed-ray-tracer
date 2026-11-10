@@ -16,13 +16,11 @@ build:
 
 env:
   PORT: "8080"
-  # Tiles in flight across all renders. Each tile renders on one core, so about the total cores
-  # (instances x cpuCores): more only slows every tile down, and heavy scenes' tiles then run
-  # past the 300 s task timeout.
+  # Tiles in flight across all renders: one per core (instances x cpuCores, 2 x 7, plus a
+  # couple to cover Hatchet's handoff between tiles). Tiles past this wait in Hatchet's queue.
   MAX_CONCURRENT_TILES: "16"
-  # One render's tiles in flight: a render alone gets most of the cores, and a second render
-  # started meanwhile still gets the rest instead of queueing behind the first.
-  MAX_TILES_PER_RENDER: "12"
+  # No per-render cap (empty = unset; Porter merges env, so removing the line wouldn't clear it).
+  MAX_TILES_PER_RENDER: ""
 
 envGroups:
   - ray-tile-secrets
