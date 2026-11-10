@@ -7,7 +7,7 @@
 # Hatchet as a GENERIC_HTTP endpoint (requestTimeoutSeconds >= 300), and disable the Cloudflare
 # tile endpoint, or both will be sent tiles.
 version: v2
-name: ray-tile-server
+name: worker
 
 build:
   method: docker
