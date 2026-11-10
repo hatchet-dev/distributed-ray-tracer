@@ -15,12 +15,12 @@ directory = "public"
 command = "../scripts/build-preview.sh"
 watch_dir = "../crates"
 
-# Tile size (app/src/workflows.ts tileSize). Defaults suit the Cloudflare tile Worker; with the
-# native tile server on Porter, bigger tiles cut per-tile overhead, e.g. TILE_WORK = "40000000",
-# TILE_MAX_SIZE = "128".
-# [vars]
-# TILE_WORK = "10000000"
-# TILE_MAX_SIZE = "64"
+# Tile size (app/src/workflows.ts tileSize). Tiles render on the native tile server (Porter),
+# where a 64px tile of a light scene takes ~0.1 s and Hatchet's per-tile handoff dominates:
+# allow 128px tiles (a 720p frame is then 60 tiles instead of 240). TILE_WORK (default
+# 10000000) still shrinks tiles for high sample counts.
+[vars]
+TILE_MAX_SIZE = "128"
 
 [limits]
 # Fan-out mostly waits on children (no CPU), but leave headroom for large renders.
