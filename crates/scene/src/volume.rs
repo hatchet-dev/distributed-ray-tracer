@@ -22,11 +22,12 @@ use fidget::{
     context::Tree,
     eval::{Function, TracingEvaluator},
     shape::{ShapeTape, ShapeTracingEval},
-    types::Interval,
     vm::{VmFunction, VmShape},
 };
 use rand::{rngs::StdRng, Rng};
 use rpt::{glm, Color, Ray};
+
+use crate::implicit::{bounds_of, clip_box, exit_time, grid_box, grid_cells};
 
 type PointEval = <VmFunction as Function>::PointEval;
 type PointTape = ShapeTape<<PointEval as TracingEvaluator>::Tape>;
@@ -98,34 +99,22 @@ pub struct Volume {
 /// Bounding box of where `density > 0` could hold (above the floor), via Fidget's intervals.
 pub fn density_bounds(density: &Tree) -> Option<([f32; 3], [f32; 3])> {
     // `bounds_of` finds where a shape is <= 0, so negate: -density <= 0 where density >= 0.
-    crate::implicit::bounds_of(&VmShape::from(-density.clone()))
+    bounds_of(&VmShape::from(-density.clone()))
 }
 
 impl Volume {
     /// `None` when the volume is empty everywhere visible.
     pub fn new(spec: VolumeSpec) -> Option<Volume> {
-        let (bmin, bmax) = density_bounds(&spec.density)?;
-        let min = [0, 1, 2].map(|i| f64::from(bmin[i]) - 1e-3);
-        let max = [0, 1, 2].map(|i| f64::from(bmax[i]) + 1e-3);
-        let cell = [0, 1, 2].map(|i| (max[i] - min[i]) / GRID as f64);
-
+        let (min, cell) = grid_box(density_bounds(&spec.density)?, GRID);
         let shape = VmShape::from(spec.density);
         let itape = shape.interval_tape(Default::default());
         let mut ieval = VmShape::new_interval_eval();
-        let mut majorants = Vec::with_capacity(GRID * GRID * GRID);
-        for k in 0..GRID {
-            for j in 0..GRID {
-                for i in 0..GRID {
-                    let lo = [min[0] + i as f64 * cell[0], min[1] + j as f64 * cell[1], min[2] + k as f64 * cell[2]];
-                    let iv = |a: usize| Interval::new(lo[a] as f32, (lo[a] + cell[a]) as f32);
-                    let upper = match ieval.eval(&itape, iv(0), iv(1), iv(2)) {
-                        Ok((v, _)) if !v.upper().is_nan() => f64::from(v.upper()),
-                        _ => MAX_DENSITY, // unknown: assume the worst
-                    };
-                    majorants.push(upper.clamp(0.0, MAX_DENSITY));
-                }
-            }
-        }
+        let majorants = grid_cells(min, cell, GRID)
+            .map(|iv| match ieval.eval(&itape, iv[0], iv[1], iv[2]) {
+                Ok((v, _)) if !v.upper().is_nan() => f64::from(v.upper()).clamp(0.0, MAX_DENSITY),
+                _ => MAX_DENSITY, // unknown: assume the worst
+            })
+            .collect();
 
         let emission = spec.temperature.map(|t| match t {
             Temperature::Constant(k) => (None, k),
@@ -290,35 +279,6 @@ pub fn blackbody(kelvin: f64) -> Color {
     };
     let srgb = glm::vec3(r, g, b).map(|c| (c / 255.0).clamp(0.0, 1.0).powf(2.2));
     srgb * (k / 1500.0).powi(4)
-}
-
-fn clip_box(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> Option<(f64, f64)> {
-    let (mut t0, mut t1) = (0.0_f64, f64::INFINITY);
-    for i in 0..3 {
-        let inv = 1.0 / ray.dir[i];
-        let (mut a, mut b) = ((lo[i] - ray.origin[i]) * inv, (hi[i] - ray.origin[i]) * inv);
-        if a > b {
-            std::mem::swap(&mut a, &mut b);
-        }
-        t0 = t0.max(a);
-        t1 = t1.min(b);
-    }
-    (t0 <= t1).then_some((t0, t1))
-}
-
-fn exit_time(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> f64 {
-    (0..3)
-        .map(|a| {
-            let d = ray.dir[a];
-            if d > 0.0 {
-                (hi[a] - ray.origin[a]) / d
-            } else if d < 0.0 {
-                (lo[a] - ray.origin[a]) / d
-            } else {
-                f64::INFINITY
-            }
-        })
-        .fold(f64::INFINITY, f64::min)
 }
 
 #[cfg(test)]

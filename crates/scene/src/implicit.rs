@@ -42,13 +42,24 @@ const MAX_SCRIPT_STEPS: u64 = 10_000_000;
 /// depth) and read its result: parts with materials, plus optional lights and sky.
 pub fn parse_scene(script: &str) -> Result<crate::parts::SceneSpec, String> {
     let mut engine = fidget::rhai::engine();
+    crate::shader::register(&mut engine);
     // Fidget's default cap is 50,000 steps; scripts can be megabytes, so allow far more while
     // still stopping a runaway loop.
     engine.on_progress(|steps| (steps > MAX_SCRIPT_STEPS).then(|| "script runtime exceeded".into()));
-    let value = engine
-        .eval::<rhai::Dynamic>(script)
-        .map_err(|e| format!("shape script: {e}"))?;
-    crate::parts::scene_from_dynamic(value).map_err(|e| format!("shape script: {e}"))
+    let error = |e: String| {
+        // Shapes and shaders are built symbolically, so Rhai can't compare their values.
+        let hint = if e.contains("cannot compare Tree types") {
+            " (shapes and shaders are built as expressions of x, y, z and the normal, so `if` and comparisons can't \
+             depend on them: use step, smoothstep or select instead)"
+        } else {
+            ""
+        };
+        format!("shape script: {e}{hint}")
+    };
+    let ast = engine.compile(script).map_err(|e| error(e.to_string()))?;
+    let value = engine.eval_ast::<rhai::Dynamic>(&ast).map_err(|e| error(e.to_string()))?;
+    let tracing = crate::shader::Tracing::new(&engine, &ast);
+    crate::parts::scene_from_dynamic(value, &tracing).map_err(error)
 }
 
 /// Just the parts of a script (see [`parse_scene`]).
@@ -73,6 +84,7 @@ const GRID: usize = 16;
 
 type PointTape = ShapeTape<<PointEval as TracingEvaluator>::Tape>;
 type GradTape = ShapeTape<<GradEval as BulkEvaluator>::Tape>;
+type Evals = (ShapeTracingEval<PointEval>, ShapeBulkEval<GradEval>);
 
 /// What Fidget's interval arithmetic proved about one grid cell.
 enum Cell {
@@ -96,44 +108,27 @@ struct Grid {
 
 impl Grid {
     fn build(shape: &VmShape) -> Option<Grid> {
-        let (bmin, bmax) = bounds_of(shape)?;
-        // Pad by a hair so surfaces on the boundary stay inside.
-        let min = [0, 1, 2].map(|i| f64::from(bmin[i]) - 1e-3);
-        let max = [0, 1, 2].map(|i| f64::from(bmax[i]) + 1e-3);
-        let cell = [0, 1, 2].map(|i| (max[i] - min[i]) / GRID as f64);
-
+        let (min, cell) = grid_box(bounds_of(shape)?, GRID);
         let tape = shape.interval_tape(Default::default());
         let mut eval = VmShape::new_interval_eval();
         let mut workspace = Default::default();
-        let mut cells = Vec::with_capacity(GRID * GRID * GRID);
         let mut tapes = Vec::new();
-        for k in 0..GRID {
-            for j in 0..GRID {
-                for i in 0..GRID {
-                    let lo = [min[0] + i as f64 * cell[0], min[1] + j as f64 * cell[1], min[2] + k as f64 * cell[2]];
-                    let iv = |a: usize| Interval::new(lo[a] as f32, (lo[a] + cell[a]) as f32);
-                    let c = match eval.eval(&tape, iv(0), iv(1), iv(2)) {
-                        Ok((v, _)) if v.lower() > 0.0 => Cell::Empty(f64::from(v.lower())),
-                        Ok((v, _)) if v.upper() < 0.0 => Cell::Solid(f64::from(v.upper())),
-                        Ok((_, trace)) => {
-                            // Simplify the tape with this cell's trace (falls back to the full
-                            // shape when there is nothing to simplify).
-                            let local = match trace {
-                                Some(t) => shape.simplify(t, Default::default(), &mut workspace).unwrap_or_else(|_| shape.clone()),
-                                None => shape.clone(),
-                            };
-                            tapes.push((local.point_tape(Default::default()), local.grad_slice_tape(Default::default())));
-                            Cell::Surface(tapes.len() - 1)
-                        }
-                        Err(_) => {
-                            tapes.push((shape.point_tape(Default::default()), shape.grad_slice_tape(Default::default())));
-                            Cell::Surface(tapes.len() - 1)
-                        }
+        let cells = grid_cells(min, cell, GRID)
+            .map(|iv| match eval.eval(&tape, iv[0], iv[1], iv[2]) {
+                Ok((v, _)) if v.lower() > 0.0 => Cell::Empty(f64::from(v.lower())),
+                Ok((v, _)) if v.upper() < 0.0 => Cell::Solid(f64::from(v.upper())),
+                result => {
+                    // Simplify the tape with this cell's trace; the full shape when there is none.
+                    let local = match result {
+                        Ok((_, Some(trace))) => shape.simplify(trace, Default::default(), &mut workspace).ok(),
+                        _ => None,
                     };
-                    cells.push(c);
+                    let local = local.as_ref().unwrap_or(shape);
+                    tapes.push((local.point_tape(Default::default()), local.grad_slice_tape(Default::default())));
+                    Cell::Surface(tapes.len() - 1)
                 }
-            }
-        }
+            })
+            .collect();
         Some(Grid { min, cell, cells, tapes })
     }
 
@@ -159,8 +154,27 @@ impl Grid {
     }
 }
 
+/// A grid of `n`³ cells over a bounding box, padded by a hair so surfaces on the boundary stay
+/// inside: its min corner and cell size.
+pub(crate) fn grid_box((bmin, bmax): ([f32; 3], [f32; 3]), n: usize) -> ([f64; 3], [f64; 3]) {
+    let min = [0, 1, 2].map(|i| f64::from(bmin[i]) - 1e-3);
+    let max = [0, 1, 2].map(|i| f64::from(bmax[i]) + 1e-3);
+    (min, [0, 1, 2].map(|i| (max[i] - min[i]) / n as f64))
+}
+
+/// Each cell of a grid (x fastest, then y, then z) as the intervals it spans on each axis.
+pub(crate) fn grid_cells(min: [f64; 3], cell: [f64; 3], n: usize) -> impl Iterator<Item = [Interval; 3]> {
+    (0..n * n * n).map(move |c| {
+        let idx = [c % n, c / n % n, c / (n * n)];
+        [0, 1, 2].map(|a| {
+            let lo = min[a] + idx[a] as f64 * cell[a];
+            Interval::new(lo as f32, (lo + cell[a]) as f32)
+        })
+    })
+}
+
 /// Ray parameter where the ray leaves the box `[lo, hi]` (assumes it's inside).
-fn exit_time(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> f64 {
+pub(crate) fn exit_time(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> f64 {
     (0..3)
         .map(|a| {
             let d = ray.dir[a];
@@ -176,7 +190,7 @@ fn exit_time(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> f64 {
 }
 
 /// Clip a ray to an axis-aligned box; returns the `[t0, t1]` overlap.
-fn clip_box(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> Option<(f64, f64)> {
+pub(crate) fn clip_box(ray: &Ray, lo: &[f64; 3], hi: &[f64; 3]) -> Option<(f64, f64)> {
     let (mut t0, mut t1) = (0.0_f64, f64::INFINITY);
     for i in 0..3 {
         let inv = 1.0 / ray.dir[i];
@@ -196,10 +210,8 @@ pub struct ImplicitShape {
     full_grad: GradTape,
     // rpt's `Shape::intersect` takes `&self`, but Fidget evaluators keep scratch state.
     // Each tile builds its own scene, so the lock is never contended.
-    evals: Mutex<(ShapeTracingEval<PointEval>, ShapeBulkEval<GradEval>)>,
+    evals: Mutex<Evals>,
 }
-
-type Evals = (ShapeTracingEval<PointEval>, ShapeBulkEval<GradEval>);
 
 impl ImplicitShape {
     pub fn new(tree: Tree) -> Self {
@@ -225,17 +237,11 @@ impl ImplicitShape {
         }
     }
 
-    fn value(&self, grid: &Grid, evals: &mut Evals, p: &glm::DVec3) -> f64 {
-        self.probe(grid, evals, p).0
-    }
-
+    /// The unit normal at `p`, from Fidget's gradient (straight up where it has none).
     fn normal(&self, grid: &Grid, evals: &mut Evals, p: &glm::DVec3) -> glm::DVec3 {
-        let tape = match grid.locate(p) {
-            Some((idx, _)) => match grid.cells[idx] {
-                Cell::Surface(t) => &grid.tapes[t].1,
-                _ => &self.full_grad,
-            },
-            None => &self.full_grad,
+        let tape = match grid.locate(p).map(|(idx, _)| &grid.cells[idx]) {
+            Some(Cell::Surface(t)) => &grid.tapes[*t].1,
+            _ => &self.full_grad,
         };
         let (x, y, z) = (p.x as f32, p.y as f32, p.z as f32);
         let out = evals.1.eval(
@@ -244,16 +250,13 @@ impl ImplicitShape {
             &[Grad::new(y, 0.0, 1.0, 0.0)],
             &[Grad::new(z, 0.0, 0.0, 1.0)],
         );
-        match out {
-            Ok(g) if g.len() == 1 => {
-                let n = glm::vec3(f64::from(g[0].dx), f64::from(g[0].dy), f64::from(g[0].dz));
-                if n.norm() > 0.0 && n.iter().all(|c| c.is_finite()) {
-                    return n.normalize();
-                }
-                glm::vec3(0.0, 0.0, 1.0)
+        if let Ok([g]) = out.as_deref() {
+            let n = glm::vec3(f64::from(g.dx), f64::from(g.dy), f64::from(g.dz));
+            if n.norm() > 0.0 && n.iter().all(|c| c.is_finite()) {
+                return n.normalize();
             }
-            _ => glm::vec3(0.0, 0.0, 1.0),
         }
+        glm::vec3(0.0, 0.0, 1.0)
     }
 }
 
@@ -333,7 +336,7 @@ impl Shape for ImplicitShape {
                 if crossed {
                     for _ in 0..24 {
                         let mid = 0.5 * (lo + hi);
-                        if self.value(grid, &mut evals, &ray.at(mid)).signum() == side {
+                        if self.probe(grid, &mut evals, &ray.at(mid)).0.signum() == side {
                             lo = mid;
                         } else {
                             hi = mid;

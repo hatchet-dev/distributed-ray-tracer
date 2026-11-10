@@ -5,21 +5,10 @@ compatibility_date = "2026-11-01"
 [build]
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
 
-# Durable Object tile sharding was tried and removed (it didn't beat plain Worker scaling);
-# Cloudflare requires the class's deletion to be recorded as a migration.
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["TileShard"]
-
-[[migrations]]
-tag = "v2"
-deleted_classes = ["TileShard"]
-
 [limits]
 # CPU ms per invocation: the Workers Paid maximum. A tile is budgeted at ~25 s of CPU
 # (WORK_PER_TILE in app/src/workflows.ts); complex shape scripts can take several times that.
 cpu_ms = 300000
-
 
 # Secrets (`wrangler secret put`, or .dev.vars locally):
 #   HATCHET_SIGNING_SECRET  required, >= 32 chars, also given to Hatchet when registering

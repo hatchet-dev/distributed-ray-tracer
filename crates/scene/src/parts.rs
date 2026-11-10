@@ -30,7 +30,10 @@
 
 use fidget::context::Tree;
 use rhai::{Dynamic, Map};
+use rhai::FnPtr;
 use rpt::{glm, hex_color, sphere, Color, Light, Material, Object, Transformable};
+
+use crate::shader::{ShaderSpec, Tracing};
 
 /// Most parts one script may have; every ray tests every part.
 pub const MAX_PARTS: usize = 16;
@@ -46,6 +49,10 @@ pub struct SceneSpec {
     pub lights: Option<Vec<Light>>,
     /// `None`: the default sky.
     pub sky: Option<Color>,
+    /// A sky shader, `fn(d) -> color`, instead of one sky color.
+    pub sky_shader: Option<ShaderSpec>,
+    /// The floor's material (and shader); `None`: the black void.
+    pub floor: Option<(Material, Option<ShaderSpec>)>,
     pub volumes: Vec<crate::volume::VolumeSpec>,
     /// The script's chosen view, if any.
     pub camera: Option<crate::CameraHint>,
@@ -55,15 +62,17 @@ pub struct Part {
     pub tree: Tree,
     /// `None`: use the default (clay) material.
     pub material: Option<Material>,
+    /// Sets the material point by point (see `shader.rs`).
+    pub shader: Option<ShaderSpec>,
 }
 
 /// Interpret a script's final value: a scene map (`parts`, `lights`, `sky`), or just parts.
-pub fn scene_from_dynamic(value: Dynamic) -> Result<SceneSpec, String> {
+pub fn scene_from_dynamic(value: Dynamic, tracing: &Tracing) -> Result<SceneSpec, String> {
     if value.is_map() {
         let mut map = value.clone().cast::<Map>();
-        if ["parts", "lights", "sky", "volumes", "camera"].iter().any(|k| map.contains_key(*k)) {
+        if ["parts", "lights", "sky", "volumes", "camera", "floor"].iter().any(|k| map.contains_key(*k)) {
             let parts = match map.remove("parts") {
-                Some(p) => from_dynamic(p)?,
+                Some(p) => from_dynamic(p, tracing)?,
                 None if map.contains_key("volumes") => vec![], // a scene can be just fire
                 None => return Err("the scene map is missing `parts`".into()),
             };
@@ -80,17 +89,49 @@ pub fn scene_from_dynamic(value: Dynamic) -> Result<SceneSpec, String> {
                 Some(l) => Some(lights(l)?),
                 None => None,
             };
-            let sky = match map.remove("sky") {
-                Some(c) => Some(color(&c).map_err(|e| e.replace("`color`", "`sky`"))?),
+            let (sky, sky_shader) = match map.remove("sky") {
+                Some(f) if f.is::<FnPtr>() => (None, Some(tracing.sky(&f)?)),
+                Some(c) => (Some(color(&c).map_err(|e| e.replace("`color`", "`sky`"))?), None),
+                None => (None, None),
+            };
+            let floor = match map.remove("floor") {
+                Some(f) => floor(f, tracing)?,
                 None => None,
             };
             if let Some(key) = map.keys().next() {
-                return Err(format!("unknown scene field `{key}` (expected parts, lights, sky, volumes, camera)"));
+                return Err(format!("unknown scene field `{key}` (expected parts, lights, sky, volumes, camera, floor)"));
             }
-            return Ok(SceneSpec { parts, lights, sky, volumes, camera });
+            return Ok(SceneSpec { parts, lights, sky, sky_shader, floor, volumes, camera });
         }
     }
-    Ok(SceneSpec { parts: from_dynamic(value)?, lights: None, sky: None, volumes: vec![], camera: None })
+    Ok(SceneSpec {
+        parts: from_dynamic(value, tracing)?,
+        lights: None,
+        sky: None,
+        sky_shader: None,
+        floor: None,
+        volumes: vec![],
+        camera: None,
+    })
+}
+
+/// The scene's `floor`: `false` (the black void, the default), `true` (light grey), a color, or a
+/// material map that may also have a `shader`.
+fn floor(v: Dynamic, tracing: &Tracing) -> Result<Option<(Material, Option<ShaderSpec>)>, String> {
+    if let Ok(on) = v.as_bool() {
+        return Ok(on.then(|| (Material::diffuse(hex_color(0xE7E7E7)), None)));
+    }
+    if v.is_map() {
+        let mut map = v.cast::<Map>();
+        let shader = match map.remove("shader") {
+            Some(f) => Some(tracing.material(&f, "the floor shader")?),
+            None => None,
+        };
+        let m = material(map).map_err(|e| format!("floor: {e}"))?;
+        return Ok(Some((m, shader)));
+    }
+    let c = color(&v).map_err(|e| format!("floor: {e}, or true, false or a material map"))?;
+    Ok(Some((Material::diffuse(c), None)))
 }
 
 /// The script's view: any of azimuth, elevation, fov, aperture, target, distance (degrees and
@@ -274,12 +315,12 @@ fn light(mut map: Map) -> Result<Light, String> {
 }
 
 /// Interpret a value as a list of parts.
-pub fn from_dynamic(value: Dynamic) -> Result<Vec<Part>, String> {
+pub fn from_dynamic(value: Dynamic, tracing: &Tracing) -> Result<Vec<Part>, String> {
     if value.is::<Tree>() {
-        return Ok(vec![Part { tree: value.cast::<Tree>(), material: None }]);
+        return Ok(vec![Part { tree: value.cast::<Tree>(), material: None, shader: None }]);
     }
     if value.is_map() {
-        return Ok(vec![part(value.cast::<Map>(), 0)?]);
+        return Ok(vec![part(value.cast::<Map>(), 0, tracing)?]);
     }
     if value.is_array() {
         let items = value.cast::<rhai::Array>();
@@ -294,9 +335,9 @@ pub fn from_dynamic(value: Dynamic) -> Result<Vec<Part>, String> {
             .enumerate()
             .map(|(i, item)| {
                 if item.is::<Tree>() {
-                    Ok(Part { tree: item.cast::<Tree>(), material: None })
+                    Ok(Part { tree: item.cast::<Tree>(), material: None, shader: None })
                 } else if item.is_map() {
-                    part(item.cast::<Map>(), i)
+                    part(item.cast::<Map>(), i, tracing)
                 } else {
                     Err(format!("part {i} must be a shape or #{{ shape, material }}, got {}", item.type_name()))
                 }
@@ -309,7 +350,7 @@ pub fn from_dynamic(value: Dynamic) -> Result<Vec<Part>, String> {
     ))
 }
 
-fn part(mut map: Map, i: usize) -> Result<Part, String> {
+fn part(mut map: Map, i: usize, tracing: &Tracing) -> Result<Part, String> {
     let shape = map.remove("shape").ok_or_else(|| format!("part {i} is missing `shape`"))?;
     if !shape.is::<Tree>() {
         return Err(format!("part {i}: `shape` must be a shape, got {}", shape.type_name()));
@@ -319,10 +360,14 @@ fn part(mut map: Map, i: usize) -> Result<Part, String> {
         Some(m) => return Err(format!("part {i}: `material` must be a map, got {}", m.type_name())),
         None => None,
     };
+    let shader = match map.remove("shader") {
+        Some(f) => Some(tracing.material(&f, &format!("part {i} shader"))?),
+        None => None,
+    };
     if let Some(key) = map.keys().next() {
-        return Err(format!("part {i}: unknown field `{key}` (expected `shape` and `material`)"));
+        return Err(format!("part {i}: unknown field `{key}` (expected `shape`, `material` and `shader`)"));
     }
-    Ok(Part { tree: shape.cast::<Tree>(), material })
+    Ok(Part { tree: shape.cast::<Tree>(), material, shader })
 }
 
 fn number(v: &Dynamic, field: &str) -> Result<f64, String> {
@@ -332,49 +377,46 @@ fn number(v: &Dynamic, field: &str) -> Result<f64, String> {
         .map_err(|_| format!("`{field}` must be a number"))
 }
 
-fn color(v: &Dynamic) -> Result<Color, String> {
+/// "#rrggbb" as sRGB components in 0..1.
+pub(crate) fn hex_rgb(s: &str) -> Option<[f64; 3]> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    let rgb = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6)?;
+    Some([16, 8, 0].map(|shift| ((rgb >> shift) & 0xff) as f64 / 255.0))
+}
+
+/// A color's sRGB components in 0..1, from "#rrggbb" or [r, g, b].
+fn components(v: &Dynamic) -> Result<[f64; 3], String> {
     if let Ok(s) = v.clone().into_string() {
-        let hex = s.trim_start_matches('#');
-        let rgb = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6);
-        return rgb.map(hex_color).ok_or_else(|| format!("`color` \"{s}\" must look like \"#rrggbb\""));
+        return hex_rgb(&s).ok_or_else(|| format!("`color` \"{s}\" must look like \"#rrggbb\""));
     }
     if v.is_array() {
         let a = v.clone().cast::<rhai::Array>();
         if a.len() == 3 {
-            let c = a.iter().map(|x| number(x, "color")).collect::<Result<Vec<_>, _>>()?;
-            if c.iter().all(|x| (0.0..=1.0).contains(x)) {
-                // sRGB components -> linear, as rpt's hex_color does.
-                return Ok(glm::vec3(c[0].powf(2.2), c[1].powf(2.2), c[2].powf(2.2)));
+            let c = [0, 1, 2].map(|i| number(&a[i], "color"));
+            if let [Ok(r), Ok(g), Ok(b)] = c {
+                if [r, g, b].iter().all(|x| (0.0..=1.0).contains(x)) {
+                    return Ok([r, g, b]);
+                }
             }
         }
     }
     Err("`color` must be \"#rrggbb\" or [r, g, b] with components in 0..1".into())
+}
+
+/// A surface color: sRGB decoded to linear, as rpt's `hex_color` does.
+fn color(v: &Dynamic) -> Result<Color, String> {
+    let [r, g, b] = components(v)?.map(|c| c.powf(2.2));
+    Ok(glm::vec3(r, g, b))
 }
 
 /// A color read as a fraction per channel, without sRGB decoding (for volume albedo).
 fn albedo(v: &Dynamic) -> Result<Color, String> {
-    if let Ok(s) = v.clone().into_string() {
-        let hex = s.trim_start_matches('#');
-        if let Some(rgb) = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6) {
-            let c = |shift: u32| ((rgb >> shift) & 0xff) as f64 / 255.0;
-            return Ok(glm::vec3(c(16), c(8), c(0)));
-        }
-        return Err(format!("`color` \"{s}\" must look like \"#rrggbb\""));
-    }
-    if v.is_array() {
-        let a = v.clone().cast::<rhai::Array>();
-        if a.len() == 3 {
-            let c = a.iter().map(|x| number(x, "color")).collect::<Result<Vec<_>, _>>()?;
-            if c.iter().all(|x| (0.0..=1.0).contains(x)) {
-                return Ok(glm::vec3(c[0], c[1], c[2]));
-            }
-        }
-    }
-    Err("`color` must be \"#rrggbb\" or [r, g, b] with components in 0..1".into())
+    let [r, g, b] = components(v)?;
+    Ok(glm::vec3(r, g, b))
 }
 
 fn material(map: Map) -> Result<Material, String> {
-    let mut m = Material::specular(hex_color(0xD9C2A7), 0.35); // clay, the default
+    let mut m = crate::default_material();
     let (mut glass, mut emit) = (false, 0.0);
     for (key, v) in &map {
         match key.as_str() {

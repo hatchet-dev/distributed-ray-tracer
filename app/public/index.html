@@ -88,13 +88,13 @@
   #render-panel { top: 16px; right: 16px; width: 300px; max-width: calc(100vw - 32px);
                   display: flex; flex-direction: column; gap: 10px; }
   #render { width: 100%; padding: 10px 14px; font-size: 14px; }
+  #download { width: 100%; margin-top: -4px; }
   #status-box { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; display: grid; gap: 3px;
                 border-top: 1px solid var(--glass-line); padding-top: 10px; }
   #status-box b { color: var(--text); font-weight: 500; }
   #status { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); font-weight: 600; font-size: 13px; }
   #status.ok { color: var(--ok); } #status.err { color: var(--err); }
   #run { font-size: 11px; word-break: break-all; }
-  .hint { font-size: 11px; color: var(--muted); }
 
   #camera-panel { bottom: 20px; left: 50%; transform: translateX(-50%); padding: 10px; }
   body.hide-ui #camera-panel { transform: translate(-50%, 4px); }
@@ -147,7 +147,6 @@
             <option value="claude-opus-5-5" selected>Claude Opus 5.5</option>
             <option value="claude-sonnet-5-5">Claude Sonnet 5.5</option>
             <option value="claude-haiku-5-5">Claude Haiku 5.5</option>
-            <option value="claude-fable-5-1">Claude Fable 5.1</option>
           </select>
         </label>
         <label title="How much the model thinks before writing: lower is faster, higher handles harder shapes">Effort
@@ -197,7 +196,7 @@
         <option value="3840x2160">3840×2160</option>
       </select>
     </label>
-    <label title="Paths traced per pixel: more is less noisy, and proportionally slower">Samples
+    <label title="Most paths traced per pixel: smooth areas stop early once their noise is below what 8-bit color shows; noisy areas (edges, soft shadows, glass) use up to this many">Max samples
       <input id="samples" type="number" min="1" max="4096" step="1" inputmode="numeric" />
     </label>
     <label title="How many times a path can bounce: more lights crevices and glass, and is slower">Bounces
@@ -205,6 +204,7 @@
     </label>
   </div>
   <button id="render" type="button" disabled title="Render the current script (⌘/Ctrl+Enter in the script)">Render</button>
+  <button id="download" class="secondary" type="button" disabled title="Save the image as a PNG at full resolution">Download PNG</button>
   <div id="status-box">
     <span id="status">Nothing rendered yet</span>
     <span>Tiles <b id="tiles">0 / 0</b> · Elapsed <b id="elapsed">0.0s</b></span>
@@ -227,6 +227,19 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const canvas = $('c'), ctx = canvas.getContext('2d');
+
+// Download the canvas (always the render's full resolution) as a PNG.
+$('download').addEventListener('click', () => {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    a.download = `render-${canvas.width}x${canvas.height}-${stamp}.png`;
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+  }, 'image/png');
+});
 let request = null, timer = null; // request: the running render's AbortController (starting another aborts it)
 let running = null; // 'chat' (writing a script, then rendering it) | 'render' | null
 
@@ -516,7 +529,7 @@ applyPreset();
 function quality() {
   const [width, height] = $('resolution').value.split('x').map(Number);
   const samples = Number($('samples').value), bounces = Number($('bounces').value);
-  if (!Number.isInteger(samples) || samples < 1 || samples > 4096) return 'Samples per pixel must be a whole number from 1 to 4096';
+  if (!Number.isInteger(samples) || samples < 1 || samples > 4096) return 'Max samples must be a whole number from 1 to 4096';
   if (!Number.isInteger(bounces) || bounces < 0 || bounces > 16) return 'Bounces must be a whole number from 0 to 16';
   return { width, height, samples, bounces };
 }
@@ -535,8 +548,35 @@ function setRunning(kind) {
   refresh();
 }
 
+/*
+ * The latest render, kept so a reload (or closing the tab and coming back later) picks it up again
+ * from its durable stream: { renderId, runId, kind, width, height, startedAt, done, turn }. `turn`
+ * is a chat turn's state: { description, before, beforeGenerated, reply (its index in chat.log), wrote }.
+ */
+const LAST = 'ray-tracer-last-render';
+let last = null;
+try { last = JSON.parse(localStorage.getItem(LAST) || 'null'); } catch {}
+function saveLast() {
+  try { last ? localStorage.setItem(LAST, JSON.stringify(last)) : localStorage.removeItem(LAST); } catch {}
+}
+
+// Reloading or closing the tab aborts the stream, and its error handler can still run while the
+// page unloads: that must not cancel the render or forget it, since the point is to come back to it.
+let leaving = false;
+addEventListener('pagehide', () => (leaving = true));
+addEventListener('beforeunload', () => (leaving = true));
+addEventListener('pageshow', () => (leaving = false));
+
 let onStop = null; // undoes a half-finished chat turn, saying why
-function stop(why) {
+/**
+ * Stops following the render. `cancel` (the user stopped it, or started another) also cancels it
+ * on the server; a failure or a lost connection leaves it to finish, to be picked up again.
+ */
+function stop(why, cancel = true) {
+  if (cancel && !leaving && running && last && !last.done) {
+    fetch(`/api/render/${last.renderId}/cancel`, { method: 'POST' }).catch(() => {});
+    last = null; saveLast();
+  }
   request?.abort(); request = null;
   clearInterval(timer);
   const undo = onStop; onStop = null;
@@ -548,22 +588,53 @@ function stop(why) {
  * Runs one job: { shape } renders a script; { description } has the model write (or change) the
  * script first, streaming it into the editor, then renders it. `kind` is 'chat' or 'render'.
  */
-async function startRender(job, kind) {
+function startRender(job, kind) {
   const p = quality();
   if (typeof p === 'string') { setStatus(p, 'err'); if (kind === 'chat') addMessage('bot', p, 'err'); return; }
+  let turn = null;
+  if (kind === 'chat') {
+    // Images apply to their own turn; later turns only hear that there were some.
+    const description = (job.imageIds?.length ? `${job.description} (with reference images, not shown again)` : job.description).slice(0, 2000);
+    turn = { description, before: script(), beforeGenerated: chat.generated, wrote: false };
+  } else {
+    lastRendered = job.shape;
+  }
+  follow({
+    kind, turn, width: p.width, height: p.height, startedAt: Date.now(),
+    connect: (signal) => fetch('/api/render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...p, camera, ...job }),
+      signal,
+    }),
+  });
+}
+
+/** Picks the latest render up again from the start of its stream: repaints it, and follows it if it's still going. */
+function resumeLast(retry = 0) {
+  if (!last) return;
+  const { renderId, runId } = last;
+  follow({
+    ...last, retry, resumed: true,
+    connect: (signal) => fetch(`/api/render/${renderId}?run=${runId}`, { signal }),
+  });
+}
+
+/** Follows a render's event stream: `connect(signal)` starts (or resumes) it and returns the response. */
+async function follow({ kind, turn, width, height, startedAt, connect, resumed = false, retry = 0 }) {
   stop();
-  if (canvas.width !== p.width || canvas.height !== p.height) {
-    canvas.width = p.width; canvas.height = p.height;
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, p.width, p.height);
+  $('download').disabled = true; // until this render's first tile, the canvas holds the dimmed old frame
+  if (resumed || canvas.width !== width || canvas.height !== height) {
+    canvas.width = width; canvas.height = height;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height);
   } else {
     // Same size: dim the previous frame and paint new tiles over it.
-    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, p.width, p.height);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, width, height);
   }
 
   let tiles = 0, total = 0; // total arrives in the `render` message
-  const t0 = performance.now();
   const tick = () => {
-    const s = (performance.now() - t0) / 1000;
+    const s = (Date.now() - startedAt) / 1000;
     $('elapsed').textContent = s.toFixed(1) + 's';
     $('tiles').textContent = `${tiles} / ${total}`;
     $('progress').style.width = (total ? 100 * tiles / total : 0) + '%';
@@ -572,52 +643,61 @@ async function startRender(job, kind) {
   tick();
 
   // A chat turn gets a reply in the log; the script it replaces comes back if the turn is cut short.
-  let reply = null, wrote = false;
-  if (kind === 'chat') {
-    reply = addMessage('bot', 'Starting…');
-    const before = script(), beforeGenerated = chat.generated;
-    // Images apply to their own turn; later turns only hear that there were some.
-    const description = (job.imageIds?.length ? `${job.description} (with reference images, not shown again)` : job.description).slice(0, 2000);
+  let reply = null;
+  const writing = turn && !turn.wrote; // this stream still has to deliver the turn's script
+  if (writing) {
+    if (resumed && chat.log[turn.reply]?.role === 'bot') {
+      // Replace the reply the page left behind with a live one.
+      chat.log.splice(turn.reply, 1);
+      $('log').children[turn.reply]?.remove();
+    }
+    reply = addMessage('bot', resumed ? 'Resuming…' : 'Starting…');
+    turn.reply = chat.log.length - 1;
     onStop = (why = 'Stopped') => {
-      if (!wrote) { $('shape').value = before; chat.generated = beforeGenerated; reply(why, 'err'); }
+      if (!turn.wrote) { $('shape').value = turn.before; chat.generated = turn.beforeGenerated; reply(why, 'err'); }
     };
-    job.onScript = (final) => {
-      wrote = true;
-      chat.generated = final;
-      chat.history.push(description);
-      reply(before.trim() ? `Updated the script · ${diffStat(before, final)}` : `Wrote the script · ${final.split('\n').length} lines`, 'ok');
-    };
-  } else {
-    lastRendered = job.shape;
   }
-  const { onScript, ...body } = job;
+  const wrote = (final) => {
+    turn.wrote = true;
+    if (last) saveLast();
+    chat.generated = final;
+    chat.history.push(turn.description);
+    lastRendered = final;
+    reply(turn.before.trim() ? `Updated the script · ${diffStat(turn.before, final)}` : `Wrote the script · ${final.split('\n').length} lines`, 'ok');
+  };
 
   setRunning(kind);
   $('run').textContent = '';
-  setStatus('Starting…');
+  setStatus(resumed ? 'Resuming…' : 'Starting…');
 
   // The response is the render's event stream (Server-Sent Events), read until done or error.
   const handlers = {};
   const on = (type, fn) => (handlers[type] = fn);
-  const fail = (msg) => { tick(); stop(msg); setStatus('Error: ' + msg, 'err'); };
+  const fail = (msg) => { if (leaving) return; tick(); stop(msg, false); setStatus('Error: ' + msg, 'err'); };
   let scriptAttempt = 0;
-  on('start', (m) => ($('run').textContent = `run ${m.runId}`));
-  on('status', (m) => { setStatus(m.message); if (!wrote) reply?.(m.message); });
+  on('start', (m) => {
+    $('run').textContent = `run ${m.runId}`;
+    if (resumed) return; // `last` already describes it (and may know it's done)
+    last = { renderId: m.renderId, runId: m.runId, kind, width, height, startedAt, done: false, turn };
+    saveLast();
+  });
+  on('status', (m) => { setStatus(m.message); if (writing && !turn.wrote) reply(m.message); });
   on('script-delta', (m) => {
+    if (!writing) return; // replaying a script that's already in the editor (and maybe edited since)
     // The model's script, streamed into the editor as it's written.
-    if (m.attempt !== scriptAttempt) { scriptAttempt = m.attempt; $('shape').value = ''; }
+    if (m.attempt !== scriptAttempt || m.restart) { scriptAttempt = m.attempt; $('shape').value = ''; }
     $('script-box').hidden = false;
     $('shape').value += m.text;
     $('shape').scrollTop = $('shape').scrollHeight;
   });
-  on('script', (m) => { $('shape').value = m.script; refresh(); });
+  on('script', (m) => { if (writing) { $('shape').value = m.script; refresh(); } });
   // The server framed the shape: orbit and zoom from there.
   on('camera', (m) => { Object.assign(camera, m.camera); save(); });
   on('render', (m) => {
     total = m.tiles;
     $('run').textContent = `${m.tileSize}px tiles · ` + $('run').textContent;
     // Rendering starts once the script parsed: this chat turn's script is final.
-    if (onScript && !wrote) { lastRendered = script(); onScript(script()); refresh(); }
+    if (writing && !turn.wrote) { wrote(script()); refresh(); }
   });
   on('tile', (t) => {
     const bin = atob(t.rgb);
@@ -630,22 +710,36 @@ async function startRender(job, kind) {
     }
     ctx.putImageData(img, t.x, t.y);
     tiles++;
+    $('download').disabled = false;
   });
-  on('done', () => { tick(); onStop = null; stop(); setStatus('Done', 'ok'); });
+  on('done', () => {
+    tick(); onStop = null;
+    if (last) {
+      // How long the render took (a replay would otherwise count the time since it started).
+      last.elapsed ??= (Date.now() - startedAt) / 1000;
+      last.done = true; saveLast();
+    }
+    stop(); setStatus('Done', 'ok');
+    if (last) $('elapsed').textContent = last.elapsed.toFixed(1) + 's';
+  });
   on('error', (m) => fail(m.message));
 
   const aborter = new AbortController();
   request = aborter;
   try {
-    const res = await fetch('/api/render', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...p, camera, ...body }),
-      signal: aborter.signal,
-    });
+    const res = await connect(aborter.signal);
+    if (res.status === 404 && resumed) { last = null; saveLast(); stop(); setStatus('The last render is no longer stored'); return; }
     if (!res.ok) throw new Error(await res.text());
     await readEvents(res.body, (type, data) => handlers[type]?.(data));
-    if (request === aborter) fail('Connection lost'); // ended without done or error
+    if (request !== aborter || leaving) return;
+    // The connection dropped without done or error: the render goes on, so pick it up again.
+    if (last && !last.done && retry < 3) {
+      // Not stop(): that would cancel the render.
+      clearInterval(timer); request = null; onStop = null; setRunning(null);
+      setStatus('Reconnecting…');
+      return setTimeout(() => resumeLast(retry + 1), 1000 * (retry + 1));
+    }
+    fail('Connection lost');
   } catch (err) {
     if (!aborter.signal.aborted) fail(err.message);
   }
@@ -675,6 +769,7 @@ async function readEvents(body, emit) {
 
 load();
 refresh();
+resumeLast();
 </script>
 </body>
 </html>

@@ -5,6 +5,7 @@
 
 mod implicit;
 mod parts;
+mod shader;
 mod tracer;
 mod volume;
 
@@ -82,7 +83,7 @@ fn validate_shape(script: &str) -> Result<Option<Bounds>, String> {
 pub struct RenderParams {
     pub width: u32,
     pub height: u32,
-    /// Paths traced per pixel.
+    /// Most paths traced per pixel (sampling is adaptive, see `tracer.rs`).
     pub samples: u32,
     /// Maximum bounces per path.
     pub bounces: u32,
@@ -95,7 +96,7 @@ pub struct RenderParams {
 }
 
 /// The material of a part whose script gives it none: warm clay.
-fn default_material() -> Material {
+pub(crate) fn default_material() -> Material {
     Material::specular(hex_color(0xD9C2A7), 0.35)
 }
 
@@ -187,22 +188,41 @@ impl CameraParams {
     }
 }
 
-/// Build the scene: the user's parts on a floor, lit by the script's lights (or, if it places
-/// none, an overhead area light) under the script's sky (or a soft blue-grey one), plus any
-/// glowing volumes.
-fn build_scene(params: &RenderParams) -> Result<(Scene, Vec<volume::Volume>), String> {
+/// A scene ready to trace: rpt's scene, plus what rpt has no notion of.
+struct Built {
+    scene: Scene,
+    volumes: Vec<volume::Volume>,
+    /// Per object in `scene.objects` (the floor first), the shader that sets its material.
+    shaders: Vec<Option<shader::Shader>>,
+    /// Replaces `scene.environment` when the script shades the sky.
+    sky: Option<shader::Shader>,
+    /// The floor (object 0) is the black void: it absorbs everything.
+    void_floor: bool,
+    /// The default sky: it lights the scene, but the camera sees black where it would show.
+    hidden_sky: bool,
+}
+
+/// Build the scene: the user's parts, lit by the script's lights (or, if it places none, an
+/// overhead area light) under the script's sky, plus any glowing volumes. Unless the script asks
+/// for a floor and a sky, the background is black: the floor at z = 0 absorbs all light (so it
+/// still hides anything below it), and the default soft blue-grey sky lights the scene without
+/// being seen.
+fn build_scene(params: &RenderParams) -> Result<Built, String> {
     let spec = implicit::parse_scene(&params.shape)?;
     let volumes = spec.volumes.into_iter().filter_map(volume::Volume::new).collect();
+    let sky = spec.sky_shader.as_ref().map(shader::Shader::new).transpose()?;
     let mut scene = Scene::new();
+    let hidden_sky = spec.sky.is_none() && sky.is_none();
     scene.environment = Environment::Color(spec.sky.unwrap_or_else(|| hex_color(0x9DB4D6) * 0.25));
-    scene.add(
-        Object::new(plane(glm::vec3(0.0, 0.0, 1.0), 0.0))
-            .material(Material::diffuse(hex_color(0xE7E7E7))),
-    );
+    let void_floor = spec.floor.is_none();
+    let (floor, floor_shader) = spec.floor.unwrap_or_else(|| (Material::diffuse(glm::vec3(0.0, 0.0, 0.0)), None));
+    scene.add(Object::new(plane(glm::vec3(0.0, 0.0, 1.0), 0.0)).material(floor));
+    let mut shaders = vec![floor_shader.as_ref().map(shader::Shader::new).transpose()?];
     // Each part is its own marched shape with its own material.
     for part in spec.parts {
         let material = part.material.unwrap_or_else(default_material);
         scene.add(Object::new(implicit::ImplicitShape::new(part.tree)).material(material));
+        shaders.push(part.shader.as_ref().map(shader::Shader::new).transpose()?);
     }
     match spec.lights {
         Some(lights) => lights.into_iter().for_each(|l| scene.add(l)),
@@ -211,7 +231,7 @@ fn build_scene(params: &RenderParams) -> Result<(Scene, Vec<volume::Volume>), St
                 .material(Material::light(hex_color(0xFFFFFF), 8.0)),
         )),
     }
-    Ok((scene, volumes))
+    Ok(Built { scene, volumes, shaders, sky, void_floor, hidden_sky })
 }
 
 #[cfg(test)]
@@ -326,6 +346,151 @@ mod tests {
         assert!(err.contains("`elevation` must be between"), "{err}");
         let err = validate_scene("#{ parts: sphere(), camera: #{ zoom: 2 } }").unwrap_err();
         assert!(err.contains("unknown field `zoom`"), "{err}");
+    }
+
+    #[test]
+    fn shaders_color_parts_and_sky() {
+        // A sphere shaded red on its +x half and blue on its -x half, under a green sky shader,
+        // seen from straight above: the left and right of the image differ, the corners are sky.
+        let script = r##"
+            fn halves(p, n) { #{ color: select(step(0.0, p.x), "#ff0000", "#0000ff"), roughness: 0.9 } }
+            fn sky(d) { mix("#00ff00", "#00ff00", 0.5) }
+            #{ parts: [ #{ shape: sphere([0, 0, 1], 1), shader: halves } ], sky: sky,
+               lights: [ #{ sun: [0, 0, 1], intensity: 3 } ] }
+        "##;
+        assert!(validate_scene(script).unwrap().bounds.is_some());
+        let mut p = params(script);
+        p.width = 32;
+        p.height = 32;
+        p.samples = 4;
+        p.camera = CameraParams { target: [0.0, 0.0, 1.0], azimuth: -90.0, elevation: 89.0, distance: 5.0, fov: 40.0, aperture: 0.0 };
+        let px = render_tile(&p, &Tile { x: 0, y: 0, w: 32, h: 32 }).unwrap();
+        let at = |x: usize, y: usize| px[(y * 32 + x) * 3..(y * 32 + x) * 3 + 3].iter().map(|&c| i32::from(c)).collect::<Vec<_>>();
+        let (left, right) = (at(10, 16), at(22, 16));
+        assert!(right[0] > right[2] + 40, "the +x half is red: {right:?}");
+        assert!(left[2] > left[0] + 40, "the -x half is blue: {left:?}");
+
+        // From a low angle, the top row is open sky.
+        p.camera.elevation = 3.0;
+        let px = render_tile(&p, &Tile { x: 0, y: 0, w: 32, h: 1 }).unwrap();
+        let top = &px[16 * 3..16 * 3 + 3];
+        assert!(top[1] > 200 && top[0] < 40 && top[2] < 40, "the sky is green: {top:?}");
+    }
+
+    /// Bump-mapped ridges, lit by a low sun, show as light and dark bands; the same surface
+    /// without the bump is evenly lit.
+    #[test]
+    fn bumps_shade_like_ridges() {
+        let row_spread = |shader: &str| {
+            let script = format!(
+                r##"fn s(p, n) {{ #{{ {shader} roughness: 0.9 }} }}
+                    #{{ parts: [ #{{ shape: box(#{{ lower: [-3, -3, 0], upper: [3, 3, 0.5] }}), shader: s }} ],
+                       lights: [ #{{ sun: [1, 0, 0.35], intensity: 3 }} ], sky: "#000000" }}"##
+            );
+            let mut p = params(&script);
+            (p.width, p.height, p.samples, p.bounces) = (48, 1, 16, 1);
+            p.camera = CameraParams { target: [0.0, 0.0, 0.5], azimuth: -90.0, elevation: 89.0, distance: 4.0, fov: 30.0, aperture: 0.0 };
+            let px = render_tile(&p, &Tile { x: 0, y: 0, w: 48, h: 1 }).unwrap();
+            let lum: Vec<i32> = px.chunks(3).map(|c| i32::from(c[1])).collect();
+            lum.iter().max().unwrap() - lum.iter().min().unwrap()
+        };
+        let flat = row_spread("");
+        let ridged = row_spread("bump: 0.04 * sin(12.0 * p.x),");
+        assert!(ridged > flat + 60, "ridges {ridged} vs flat {flat}");
+    }
+
+    /// The shader examples from the model's prompt (app/src/describe.ts) parse and render.
+    #[test]
+    fn prompt_shader_examples_work() {
+        let script = r##"
+            fn marble(p, n) {
+              let v = 0.5 + 0.5 * sin(5.0 * p.x + 2.0 * p.z + 1.5 * sin(3.0 * p.y + 0.7 * sin(5.0 * p.z)));
+              #{ color: mix("#f2efe9", "#5c6470", smoothstep(0.65, 0.95, v)), roughness: 0.15 }
+            }
+            fn mossy(p, n) {
+              let up = smoothstep(0.35, 0.75, n.z + 0.15 * sin(9.0 * p.x) * cos(8.0 * p.y));
+              #{ color: select(up, "#4f7a2a", "#6f6a64"), roughness: mix(0.6, 0.95, up) }
+            }
+            fn checker(p, n) { let c = fract(0.5 * (floor(2.0 * p.x) + floor(2.0 * p.y))) * 2.0;
+              #{ color: mix("#1a1a1a", "#eeeeee", c) } }
+            fn dusk(d) { mix("#f2a65a", "#1b2a4a", smoothstep(-0.02, 0.45, d.z)) }
+            fn hammered(p, n) {
+              let d = sin(17.0 * p.x + 3.0 * sin(5.0 * p.z)) * sin(19.0 * p.y + 2.0 * sin(4.0 * p.x)) * sin(15.0 * p.z);
+              #{ color: "#b87333", metallic: 1.0, roughness: 0.3, bump: 0.012 * d }
+            }
+            let c1 = "#aa3311";
+            let c2 = [0.1, 0.2, 0.9];
+            #{ parts: [
+                 #{ shape: sphere([0, 0, 1], 1), shader: marble },
+                 #{ shape: sphere([2.5, 0, 1], 1), shader: mossy, material: #{ metallic: 0.2 } },
+                 #{ shape: box(#{ lower: [-4, -4, 0], upper: [4, -3, 0.2] }), shader: checker },
+                 #{ shape: sphere([0, 2.5, 1], 1), shader: hammered },
+                 #{ shape: sphere([-2.5, 0, 1], 1), shader: |p, n| #{ color: mix(c1, c2, step(0.0, p.x)) } },
+               ], sky: dusk }
+        "##;
+        validate_scene(script).unwrap();
+        assert!(render_tile(&params(script), &Tile { x: 0, y: 0, w: 16, h: 16 }).is_ok());
+    }
+
+    /// Unless a script asks for a floor or a sky, everything around the shape is pure black,
+    /// while the hidden sky still lights it.
+    #[test]
+    fn the_default_background_is_black() {
+        let render = |script: &str, elevation: f64| {
+            let mut p = params(script);
+            (p.width, p.height, p.samples) = (32, 32, 8);
+            p.camera = CameraParams { target: [0.0, 0.0, 1.0], azimuth: -90.0, elevation, distance: 6.0, fov: 40.0, aperture: 0.0 };
+            render_tile(&p, &Tile { x: 0, y: 0, w: 32, h: 32 }).unwrap()
+        };
+        let px = |img: &[u8], x: usize, y: usize| [0, 1, 2].map(|c| img[(y * 32 + x) * 3 + c]);
+        let ball = "sphere([0, 0, 1], 1)";
+        // Low view: the top corner is sky, the bottom corner floor, the center the ball.
+        let img = render(ball, 5.0);
+        assert_eq!(px(&img, 0, 0), [0, 0, 0], "sky");
+        assert_eq!(px(&img, 0, 31), [0, 0, 0], "floor");
+        assert!(px(&img, 16, 12).iter().all(|&c| c > 30), "the ball is lit: {:?}", px(&img, 16, 12));
+        // A chrome ball facing the hidden sky still reflects it (not black).
+        let chrome = r#"[#{ shape: sphere([0, 0, 1], 1), material: #{ metallic: 1.0, roughness: 0.05 } }]"#;
+        assert!(px(&render(chrome, 30.0), 16, 13).iter().any(|&c| c > 5));
+        // Asking for a floor and a sky shows them.
+        let img = render(r##"#{ parts: sphere([0, 0, 1], 1), floor: "#cc2222", sky: "#2244aa" }"##, 5.0);
+        let (sky, floor) = (px(&img, 0, 0), px(&img, 0, 31));
+        assert!(sky[2] > sky[0] + 40, "blue sky: {sky:?}");
+        assert!(floor[0] > floor[2] + 20, "red floor: {floor:?}");
+        assert!(render(r#"#{ parts: sphere([0, 0, 1], 1), floor: true }"#, 5.0)[31 * 32 * 3] > 40, "the old grey floor");
+        // Floors take material maps with shaders, and bad floors are explained.
+        validate_scene(r##"fn tiles(p, n) { #{ color: mix("#111111", "#eeeeee", step(0.5, fract(p.x))) } }
+            #{ parts: sphere(), floor: #{ roughness: 0.2, shader: tiles } }"##).unwrap();
+        assert!(validate_shape("#{ parts: sphere(), floor: 3 }").unwrap_err().contains("floor:"));
+    }
+
+    /// Adaptive sampling stops smooth pixels early, and still closely matches a render allowed 4x the samples.
+    #[test]
+    fn adaptive_sampling_saves_work() {
+        let script = r#"#{ parts: [ #{ shape: sphere([0, 0, 1], 1) },
+            #{ shape: sphere([2.2, 0, 0.7], 0.7), material: #{ glass: true, ior: 1.5, roughness: 0.05 } } ],
+            floor: true, lights: [ #{ point: [2, -3, 4], intensity: 30 } ] }"#;
+        let mut p = params(script);
+        (p.width, p.height, p.bounces) = (48, 32, 4);
+        p.camera = CameraParams { target: [1.0, 0.0, 0.8], distance: 8.0, ..CameraParams::default() };
+        let tile = Tile { x: 0, y: 0, w: 48, h: 32 };
+        let render = |samples| {
+            let p = RenderParams { samples, ..p.clone() };
+            tracer::render_tile_counted(&p, &tile).unwrap()
+        };
+        let (img, traced) = render(256);
+        let (reference, _) = render(1024);
+        let full = 256 * 48 * 32;
+        let err = img.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs()).sum::<f64>() / img.len() as f64;
+        eprintln!("traced {traced} of {full} ({:.0}%), mean error {err:.2} levels", 100.0 * traced as f64 / full as f64);
+        assert!(traced < full * 2 / 3, "traced {traced} of {full}");
+        assert!(err < 2.5, "mean error {err}");
+    }
+
+    #[test]
+    fn shader_comparisons_get_a_hint() {
+        let err = validate_shape("fn s(p, n) { if n.z > 0.5 { #{} } else { #{} } } [#{ shape: sphere(), shader: s }]").unwrap_err();
+        assert!(err.contains("use step, smoothstep or select"), "{err}");
     }
 
     #[test]

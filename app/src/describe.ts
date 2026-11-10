@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Effort, Model } from './messages';
+import { MODELS, type Effort, type Model } from './messages';
+import type { ImageType } from './scripts';
 
 /**
  * Created on first use: on Cloudflare, secrets reach `process.env` (where the SDK reads
@@ -9,6 +10,15 @@ let anthropic: Anthropic | undefined;
 
 const DEFAULT_MODEL: Model = 'claude-opus-5-5';
 const DEFAULT_EFFORT: Effort = 'medium';
+/**
+ * Web search runs on Anthropic's side (with dynamic filtering): the model decides when to look
+ * something up. A few searches at most per request, since each adds cost and result tokens.
+ */
+const TOOLS = [{ type: 'web_search_20260209' as const, name: 'web_search' as const, max_uses: 3 }];
+
+/** Streaming progress: script text (`restart` after a search, dropping text written before it) and searches. */
+export type Progress = { text: (delta: string, restart: boolean) => void; search: () => void };
+
 /** Server-side refusal fallback is unavailable for Haiku 5.5; the others accept `fallbacks: "default"`. */
 const SUPPORTS_FALLBACK = (model: Model) => model !== 'claude-haiku-5-5';
 
@@ -24,6 +34,10 @@ map that also places lights and sets the sky (see Lighting).
 
 Scene conventions:
 - Z is up. The floor is the plane z = 0, so shapes should rest on or above it.
+- The background is black by default: the floor is an invisible black void (it absorbs all light,
+  so shadows don't show on it; anything below z = 0 is hidden) and the default sky lights the
+  scene without being seen. When the description calls for a ground, a table or a setting, model
+  it or set the scene map's floor (see Lighting); set sky to show a sky behind the scene.
 - Keep the shape within about x, y in [-4, 4] and z in [0, 6]; the camera frames roughly that region.
 - Anything outside x, y in [-20, 20], z in [-2, 20] is not rendered.
 - Units are arbitrary; a person-sized sculpture is ~3 units tall.
@@ -53,8 +67,15 @@ Transforms (method-chaining form shape.move(...) also works):
 
 Raw math on x, y, z (operator overloading builds expressions):
 - + - * / % and unary -, numbers mix freely with expressions
-- min, max, abs, sqrt, square, sin, cos, tan, asin, acos, atan, atan2, exp, ln, floor, ceil, round, mix
+- min, max, abs, sqrt, square, sin, cos, tan, asin, acos, atan, atan2, exp, ln, floor, ceil, round
+- Branch-free helpers (also used by shaders, below): mix(a, b, t) linear interpolation (also of two
+  colors), clamp(v, lo, hi), step(edge, v) (1 where v >= edge, else 0), smoothstep(e0, e1, v),
+  select(cond, a, b) (a where cond is 1, b where it is 0; also colors), fract(v). A color
+  ([r, g, b], or what mix returns) can be scaled or offset by a number or expression (c * 0.8,
+  c + 0.3 * glow); to combine two colors use mix (+ on two arrays joins lists).
 - Constants: PI, TAU, E, SQRT_2, ...
+- x, y, z are symbols, not numbers: Rhai can't compare them, so if/else, ==, <, > on anything built
+  from them is an error. Use step, smoothstep, select, min and max instead.
 - Example: a torus of major radius 2, minor 0.5, lying flat at height 1:
     let q = sqrt(square(x) + square(y)) - 2.0;
     sqrt(square(q) + square(z - 1.0)) - 0.5
@@ -81,8 +102,53 @@ A part may also be a bare shape (default clay). Material fields, all optional:
 Use materials whenever the description implies colors, metal, glass or light. Every part is
 traced separately, so group pieces that share a material into one part with union(...).
 
+Shaders: to vary a part's look across its surface (stripes, marble, wood grain, rust, moss on top,
+glowing veins, checkerboards), give the part a shader function instead of (or as well as) a material:
+    fn name(p, n) { #{ color: ..., roughness: ..., metallic: ..., emit: ... } }
+    #{ shape: s, material: #{ ... }, shader: name }
+- Signature: exactly two arguments. p is the surface point and n the unit outward normal, each with
+  fields .x .y .z. Return a map with any of color ("#rrggbb" or [r, g, b], components 0..1, each a
+  number or an expression), roughness (0..1), metallic (0..1), emit (0..100) and bump (below).
+  Fields the shader returns override the part's material at each point; the rest (glass, ior, and anything not
+  returned) come from material. Unknown fields or other types are errors.
+- The function runs once with symbolic p and n and becomes one expression per field, evaluated at
+  every hit. So it must be branch-free: no if/else or comparisons on p or n (use step, smoothstep,
+  select, mix, clamp). Loops with fixed counts (e.g. summing noise octaves) are fine.
+- Script functions can't see the script's outer variables; put constants inside the function, or
+  use a closure, which can: shader: |p, n| #{ color: mix(c1, c2, step(0.0, p.x)) }.
+- Noise: there is no noise built in; layer sin/cos at a few frequencies and angles, as for volumes.
+- Keep shaders modest (a few dozen operations; at most ~8 noise layers): each hit evaluates them.
+- bump: a small height in world units, as if the surface were raised that far along its normal.
+  Only lighting changes (the normal tilts by the bump's slope): the outline and shadows stay those
+  of the shape, so use it for fine relief (wood grain, brushed or hammered metal, stucco, bark,
+  scratches, fabric weave, tiles' grout lines, ripples) and change the shape itself for big lumps.
+  What shows is the slope, about amplitude x frequency: 0.01 * sin(40 * p.x) (slope 0.4) is clearly
+  visible; slopes above ~2 are capped. Typical amplitudes are 0.002-0.03. Bumps read best under a
+  low or side light. Combine with color, e.g. darken the grooves using the same expression.
+- Sky shader: the scene map's sky may be a function of one argument, fn name(d) -> color, where d is
+  the unit direction (d.z > 0 is up), e.g. a gradient horizon or a sunset. It replaces the flat sky
+  color for what is seen and for the ambient light it gives (it is visible, unlike the default sky). Keep it dim-ish (components up to 1).
+- Examples:
+    fn marble(p, n) {
+      let v = 0.5 + 0.5 * sin(5.0 * p.x + 2.0 * p.z + 1.5 * sin(3.0 * p.y + 0.7 * sin(5.0 * p.z)));
+      #{ color: mix("#f2efe9", "#5c6470", smoothstep(0.65, 0.95, v)), roughness: 0.15 }
+    }
+    fn mossy(p, n) {   // moss grows on upward faces, rock elsewhere
+      let up = smoothstep(0.35, 0.75, n.z + 0.15 * sin(9.0 * p.x) * cos(8.0 * p.y));
+      #{ color: select(up, "#4f7a2a", "#6f6a64"), roughness: mix(0.6, 0.95, up) }
+    }
+    fn hammered(p, n) {   // hammered copper: dimples in the lighting, not the outline
+      let d = sin(17.0 * p.x + 3.0 * sin(5.0 * p.z)) * sin(19.0 * p.y + 2.0 * sin(4.0 * p.x)) * sin(15.0 * p.z);
+      #{ color: "#b87333", metallic: 1.0, roughness: 0.3, bump: 0.012 * d }
+    }
+    fn checker(p, n) { let c = fract(0.5 * (floor(2.0 * p.x) + floor(2.0 * p.y))) * 2.0;
+      #{ color: mix("#1a1a1a", "#eeeeee", c) } }
+    fn dusk(d) { mix("#f2a65a", "#1b2a4a", smoothstep(-0.02, 0.45, d.z)) }
+    #{ parts: [ #{ shape: statue, shader: marble }, #{ shape: rocks, shader: mossy },
+                 #{ shape: kettle, shader: hammered } ], sky: dusk }
+
 Lighting: to choose the lights, end the script with a scene map instead:
-    #{ parts: [ ...parts... ] (or a single shape), lights: [ ...lights... ], sky: "#rrggbb" }
+    #{ parts: [ ...parts... ] (or a single shape), lights: [ ...lights... ], sky: "#rrggbb", floor: "#rrggbb" }
 Each light has exactly one of:
 - sphere: [x, y, z], radius: r   soft area light with soft shadows (default intensity 8 at radius 1;
                                  the default scene light is radius 2, intensity 8, at about z = 9)
@@ -92,7 +158,11 @@ Each light has exactly one of:
                                  (default intensity 2)
 plus optional color ("#rrggbb" or [r, g, b]) and intensity. At most 8 lights. sky is the ambient
 color from every direction (default a dim blue-grey, about [0.08, 0.11, 0.17]); use a dark sky for
-night scenes and a brighter one for daylight. Without lights, the scene keeps its default soft
+night scenes and a brighter one for daylight. The default sky lights the scene but shows as black;
+a sky the script sets is also visible behind the scene. floor: a visible ground plane at z = 0 that
+catches shadows and reflections: a color ("#d8d4cc"), true (light grey), or a material map that
+may have a shader, e.g. floor: #{ color: "#3a3f47", roughness: 0.25, shader: tiles }. Leave it out
+for the black void; set it when the description implies ground, a floor, a landscape or a studio. Without lights, the scene keeps its default soft
 overhead light. Lights themselves are invisible: pair a light with an emissive part if the lamp
 should be seen glowing. Every part, glass included, blocks light, so put point and sphere lights
 outside all parts (e.g. just beside a lamp's glass, not inside it). Choose lights when the
@@ -203,8 +273,16 @@ Examples:
       sky: "#0d1424",
     }
 
+Web search: you have a web_search tool. Use it only when the request names a specific real-world
+object, building, vehicle, creature or artwork and you are unsure of its proportions or distinctive
+details (one or two searches is plenty). Don't search for generic or imaginary things, or for what
+attached reference images already show. Write nothing before or between searches.
+
 Reply with only the Rhai script: no explanation and no Markdown code fences. Short comments inside
 the script are welcome.`;
+
+/** Blocks other than the model's own text and thinking: searches, their results, and filtering code. */
+const isToolBlock = (type: string) => !['text', 'thinking', 'redacted_thinking'].includes(type);
 
 /** Strip Markdown fences in case the model adds them anyway. */
 function cleanScript(text: string): string {
@@ -226,14 +304,17 @@ export class ScriptWriter {
       script?: string;
       history?: string[];
       /** Reference images the user attached to this request. */
-      images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; data: string }[];
+      images?: { mediaType: ImageType; data: string }[];
     },
     private model: Model = DEFAULT_MODEL,
     private effort: Effort = DEFAULT_EFFORT
-  ) {}
+  ) {
+    // Defense in depth: requests are validated against MODELS, but a run could be started another way.
+    if (!MODELS.includes(model)) throw new Error(`model ${model} is not allowed`);
+  }
 
   /** First attempt: a new script, or (given the current one) the requested change to it. */
-  write(onText: (delta: string) => void) {
+  write(progress: Progress) {
     const { description, script, history = [], images = [] } = this.request;
     let text = `Write a shape script for: ${description}`;
     if (script !== undefined) {
@@ -262,44 +343,68 @@ export class ScriptWriter {
         { type: 'text' as const, text },
       ],
     });
-    return this.complete(onText);
+    return this.complete(progress);
   }
 
   /** Ask for a corrected script after `error` from Fidget's parser. */
-  repair(error: string, onText: (delta: string) => void) {
+  repair(error: string, progress: Progress) {
     this.messages.push({
       role: 'user',
       content: `That script failed when Fidget evaluated it:\n\n${error}\n\nReply with the corrected full script.`,
     });
-    return this.complete(onText);
+    return this.complete(progress);
   }
 
-  private async complete(onText: (delta: string) => void): Promise<string> {
+  private async complete(progress: Progress): Promise<string> {
     anthropic ??= new Anthropic();
-    const stream = anthropic.beta.messages.stream({
-      model: this.model,
-      max_tokens: 128000, // the most any of the selectable models can write
-      thinking: { type: 'adaptive' },
-      output_config: { effort: this.effort },
-      // If a safety classifier declines, let the API retry on its recommended fallback model.
-      ...(SUPPORTS_FALLBACK(this.model)
-        ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
-        : {}),
-      system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-      messages: this.messages,
-    });
-    stream.on('text', (delta) => onText(delta));
-    const message = await stream.finalMessage();
+    let message: Anthropic.Beta.BetaMessage;
+    let restart = false; // the next text follows a search: drop what was streamed before it
+    for (;;) {
+      const stream = anthropic.beta.messages.stream({
+        model: this.model,
+        max_tokens: 128000, // the most any of the selectable models can write
+        thinking: { type: 'adaptive' },
+        output_config: { effort: this.effort },
+        // If a safety classifier declines, let the API retry on its recommended fallback model.
+        ...(SUPPORTS_FALLBACK(this.model)
+          ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
+          : {}),
+        tools: TOOLS,
+        system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
+        messages: this.messages,
+      });
+      stream.on('streamEvent', (event) => {
+        if (event.type === 'content_block_start' && isToolBlock(event.content_block.type)) {
+          if (event.content_block.type === 'server_tool_use' && event.content_block.name === 'web_search') progress.search();
+          restart = true;
+        }
+      });
+      stream.on('text', (delta) => {
+        progress.text(delta, restart);
+        restart = false;
+      });
+      message = await stream.finalMessage();
 
-    if (message.stop_reason === 'refusal') {
-      throw new Error(
-        `The model declined to write this shape${message.stop_details?.explanation ? `: ${message.stop_details.explanation}` : ''}`
-      );
+      if (message.stop_reason === 'refusal') {
+        throw new Error(
+          `The model declined to write this shape${message.stop_details?.explanation ? `: ${message.stop_details.explanation}` : ''}`
+        );
+      }
+      if (message.stop_reason === 'max_tokens') throw new Error('Shape script generation ran out of output tokens');
+
+      // A turn that searched may pause; send it back as it is and the API continues it.
+      const last = this.messages[this.messages.length - 1];
+      if (last.role === 'assistant' && Array.isArray(last.content)) last.content.push(...message.content);
+      else this.messages.push({ role: 'assistant', content: [...message.content] });
+      if (message.stop_reason !== 'pause_turn') break;
     }
-    if (message.stop_reason === 'max_tokens') throw new Error('Shape script generation ran out of output tokens');
 
-    this.messages.push({ role: 'assistant', content: message.content });
-    const text = message.content
+    // The script is the text after the last search (with citations, it can span several blocks).
+    const content = message.content;
+    let start = content.length;
+    while (start > 0 && !isToolBlock(content[start - 1].type)) start--;
+    const text = content
+      .slice(start)
       .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
       .map((b) => b.text)
       .join('');

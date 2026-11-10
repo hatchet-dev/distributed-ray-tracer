@@ -3,15 +3,22 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::pin::pin;
 use std::rc::Rc;
+use std::time::Duration;
 
 use endpoint::{handle, scripts, Config, Scripts, HEALTHCHECK_PATH, TRIGGER_PATH};
+use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use worker::*;
 
 /// Scripts kept in this isolate's memory, most recent last: a render's tiles share one script,
 /// so most tiles skip the engine round trip. Bounded, since scripts can be megabytes.
 const CACHED_SCRIPTS: usize = 4;
+/// A script read normally takes well under a second. A stalled one (the engine connection can
+/// hang for minutes before failing) is abandoned after this, so the tile fails fast and Hatchet
+/// retries it instead of the render waiting on it.
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(20);
 
 thread_local! {
     static CACHE: RefCell<VecDeque<(String, Rc<String>)>> = const { RefCell::new(VecDeque::new()) };
@@ -26,6 +33,18 @@ struct StreamScripts {
 
 impl StreamScripts {
     async fn fetch(&self, id: &str) -> std::result::Result<String, String> {
+        let controller = AbortController::default();
+        let read = pin!(self.subscribe(id, controller.signal()));
+        match select(read, pin!(Delay::from(SCRIPT_TIMEOUT))).await {
+            Either::Left((result, _)) => result,
+            Either::Right(_) => {
+                controller.abort();
+                Err(format!("timed out after {}s", SCRIPT_TIMEOUT.as_secs()))
+            }
+        }
+    }
+
+    async fn subscribe(&self, id: &str, signal: AbortSignal) -> std::result::Result<String, String> {
         let token = self.token.as_deref().ok_or("HATCHET_CLIENT_TOKEN is not set")?;
         let engine = self.engine.as_deref().ok_or("the token has no engine address; set HATCHET_ENGINE_URL")?;
         let err = |e: Error| e.to_string();
@@ -38,7 +57,7 @@ impl StreamScripts {
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
         let request = Request::new_with_init(&format!("{engine}{}", scripts::SUBSCRIBE_PATH), &init).map_err(err)?;
-        let mut response = Fetch::Request(request).send().await.map_err(err)?;
+        let mut response = Fetch::Request(request).send_with_signal(&signal).await.map_err(err)?;
         if response.status_code() != 200 {
             let text = response.text().await.unwrap_or_default();
             return Err(format!("subscribe answered {}: {text}", response.status_code()));

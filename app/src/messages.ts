@@ -3,6 +3,7 @@
 export type RenderSettings = {
   width: number;
   height: number;
+  /** Most paths traced per pixel; the tracer stops early once a pixel converges. */
   samples: number;
   bounces: number;
   /** Orbit camera, see `CameraParams` in crates/scene. Omitted fields use the defaults. */
@@ -25,8 +26,6 @@ export type RenderSceneInput = RenderSettings & {
   topic: string;
   /** Point the camera at the shape's bounding box (when the shape is new). */
   frame?: boolean;
-  /** Publish `done` at the end (false when a parent workflow finishes the stream itself). */
-  finish?: boolean;
   /** The script's `validate-shape` result, when the caller already has it. */
   checked?: Validation;
 };
@@ -40,7 +39,8 @@ export type Validation = {
 };
 
 /** Models and effort levels the user can pick for script generation. */
-export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'] as const;
+// Not Fable: too costly for this app. parseJob rejects anything else, and ScriptWriter checks again.
+export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'] as const;
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type Model = (typeof MODELS)[number];
 export type Effort = (typeof EFFORTS)[number];
@@ -66,7 +66,8 @@ export type DescribeInput = RenderSettings & {
  */
 export type StreamMessage =
   | { type: 'status'; message: string }
-  | { type: 'script-delta'; attempt: number; text: string }
+  /** `restart`: discard what this attempt streamed so far (the model wrote text, then searched). */
+  | { type: 'script-delta'; attempt: number; text: string; restart?: boolean }
   | { type: 'script'; attempt: number; script: string }
   | { type: 'camera'; camera: Camera }
   | { type: 'render'; tiles: number; tileSize: number }

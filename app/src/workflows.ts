@@ -31,7 +31,6 @@ type Tile = { x: number; y: number; w: number; h: number };
 type Bounds = NonNullable<Validation['bounds']>;
 /** A workflow run's output is keyed by task name. */
 type TileRunOutput = { [RENDER_TILE]: Tile & { rgb: string } };
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Ctx = Parameters<typeof clientFromContext>[0];
 
 const publish = (ctx: Ctx, topic: string, msg: StreamMessage) =>
@@ -91,14 +90,14 @@ function frame(camera: Camera, bounds: Bounds, width: number, height: number): C
   return { ...camera, target: center, distance: Math.min(60, Math.max(1, distance * 1.05)) };
 }
 
-/** Run `fn`, publishing `done` on success (if `finish`) or `error` on failure. */
-async function finishing<T>(ctx: Ctx, topic: string, finish: boolean, fn: () => Promise<T>): Promise<T> {
+/** Run `fn`, publishing `error` if it fails, and `done` if it succeeds and `done` is set. */
+async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Promise<T>): Promise<T> {
   try {
     const out = await fn();
-    if (finish) await publish(ctx, topic, { type: 'done' });
+    if (done) await publish(ctx, topic, { type: 'done' });
     return out;
   } catch (err) {
-    if (finish) await publish(ctx, topic, { type: 'error', message: describe(err) }).catch(() => {});
+    await publish(ctx, topic, { type: 'error', message: describe(err) }).catch(() => {});
     throw err;
   }
 }
@@ -112,8 +111,8 @@ export const renderScene = hatchet.task({
   name: 'render-scene',
   executionTimeout: '60m',
   fn: async (input: RenderSceneInput, ctx) =>
-    finishing(ctx, input.topic, input.finish ?? true, async () => {
-      const { topic, finish: _finish, frame: shouldFrame, checked, scriptId, ...params } = input;
+    finishing(ctx, input.topic, true, async () => {
+      const { topic, frame: shouldFrame, checked, scriptId, ...params } = input;
 
       // Parse the script once up front, so a typo fails here instead of in every tile.
       let validation = checked;
@@ -184,14 +183,15 @@ export const renderScene = hatchet.task({
 /**
  * Turns a plain-language description into a shape script with a language model, checks it with
  * the endpoint's `validate-shape` task (feeding parse errors back to the model to repair), then
- * renders it with `render-scene` as a child workflow, framed on the new shape. Everything
- * streams to one durable topic.
+ * starts `render-scene` as a child workflow, framed on the new shape, and returns without waiting
+ * for it. Everything streams to one durable topic.
  */
 export const describeAndRender = hatchet.task({
   name: 'describe-and-render',
   executionTimeout: '60m',
   fn: async (input: DescribeInput, ctx) =>
-    finishing(ctx, input.topic, true, async () => {
+    // The render finishes the stream (render-scene publishes `done`); this only reports failures.
+    finishing(ctx, input.topic, false, async () => {
       const { topic, description, model, effort, scriptId: currentId, history, imageIds = [], frame: shouldFrame = true, ...settings } = input;
       const current = currentId === undefined ? undefined : await getScript(currentId);
       const images = await Promise.all(imageIds.map(getImage));
@@ -209,10 +209,14 @@ export const describeAndRender = hatchet.task({
         });
         // Forward the model's text as it streams, so the editor fills in live.
         let pending = Promise.resolve();
-        const onText = (text: string) => {
-          pending = pending.then(() => publish(ctx, topic, { type: 'script-delta', attempt, text }));
+        const onText = (text: string, restart: boolean) => {
+          pending = pending.then(() => publish(ctx, topic, { type: 'script-delta', attempt, text, restart }));
         };
-        script = attempt === 1 ? await writer.write(onText) : await writer.repair(lastError, onText);
+        const onSearch = () => {
+          pending = pending.then(() => publish(ctx, topic, { type: 'status', message: 'Searching the web…' }));
+        };
+        const progress = { text: onText, search: onSearch };
+        script = attempt === 1 ? await writer.write(progress) : await writer.repair(lastError, progress);
         await pending;
         await publish(ctx, topic, { type: 'script', attempt, script });
 
@@ -234,8 +238,11 @@ export const describeAndRender = hatchet.task({
       const cameraOf = (v: Validation | null) => JSON.stringify(v?.camera ?? {});
       const before = currentId === undefined ? null : await validate(ctx, currentId).catch(() => null);
       const reframe = shouldFrame || cameraOf(before) !== cameraOf(checked);
-      await ctx.runChild(renderScene, { ...settings, scriptId, topic, frame: reframe, finish: false, checked });
-      return { script };
+      // Hand the render off instead of waiting on it: a long-lived task can lose its connection
+      // (Cloudflare drops it with code 1006), and this one would otherwise be held open through
+      // the model call and the whole render. The render API watches the returned run instead.
+      const render = await ctx.runNoWaitChild(renderScene, { ...settings, scriptId, topic, frame: reframe, checked });
+      return { script, renderRunId: await render.getWorkflowRunId() };
     }),
 });
 

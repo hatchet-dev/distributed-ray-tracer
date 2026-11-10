@@ -20,7 +20,7 @@ Keep chatting to refine the shape ("make it gold", "add a second tower", "view i
 message sends the current script, including any edits you made by hand, with the earlier requests,
 and the model returns the full updated script. A script's last expression is the scene: one shape,
 a list of parts with materials, or a map that also places lights, sky, fire and smoke volumes, and
-the camera. The render options (resolution, samples per pixel, bounces) live in their own panel.
+the camera. The render options (resolution, maximum samples per pixel, bounces) live in their own panel.
 
 ## Layout
 
@@ -91,6 +91,21 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   keeps it for the tenant's stream retention. The model can write at most 128K output tokens (about
   400 KB of script, less what it spends thinking), and refining a script sends it in the prompt,
   so the largest scripts have to be written or pasted by hand.
+- **Background.** By default the background is black: the floor plane at z = 0 absorbs all light
+  (rpt's "diffuse" material still has a Fresnel highlight, so a black material wouldn't do), and the
+  default dim sky lights the scene but shows black to camera rays and rays straight through glass.
+  A script opts in with the scene map's `floor` (a color, `true`, or a material map with an optional
+  `shader`) and `sky`.
+- **Shaders.** A part can have a `shader: fn(p, n)` that returns any of `color`, `roughness`,
+  `metallic` and `emit` (overriding its `material` point by point) and `bump`, a height whose
+  slope along the surface tilts the shading normal (bump mapping; its gradient comes from Fidget's
+  gradient evaluator, and the tilt is capped at 70°), and the scene's `sky` can be a
+  `fn(d)` returning a color. Like shapes, shaders run once with symbolic inputs (`p` is x, y, z;
+  `n` is three extra Fidget variables), so each output becomes a Fidget expression that every hit
+  evaluates (`crates/scene/src/shader.rs`); they're branch-free, using registered `step`,
+  `smoothstep`, `select`, `clamp`, `fract` and a three-argument `mix` (Fidget's own two-argument
+  `mix` is a pseudo-random mix). Wrong signatures, unknown fields or wrong types fail in
+  `validate-shape` with a message the repair loop sends back to the model.
 - **Reference images.** A chat message can carry up to 6 images (attach, paste, or drop them on the
   chat). The page shrinks each to what Claude reads (at most 2576 px on the long edge, as JPEG,
   typically well under 1 MB) and uploads it to `POST /api/images` as soon as it is attached; the
@@ -106,13 +121,16 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   message instead of in every tile.
 - **Requests.** The page POSTs the job (the render settings, plus a `shape` script or a chat
   message) to `/api/render`, and the response is the render's event stream, read with `fetch`. The
-  Worker starts the workflow, then reads its durable stream topic and forwards each message.
+  Worker starts the workflow, then reads its durable stream topic and forwards each message; the
+  first event, `start`, carries the render and run ids. A **Download PNG** button saves the canvas
+  at full resolution.
 - **Chat → script.** `describe-and-render` streams the model's script (`claude-opus-5-5` by default,
   adaptive thinking, with server-side refusal fallback enabled) into the editor as it is written,
   validates it with the endpoint's `validate-shape` task, and on a parse error sends the error back
-  to the model to fix it, up to 3 attempts. Then it runs `render-scene` as a child workflow, passing
-  the validation result along so the script isn't checked twice. While it waits on its tiles, a
-  parent task uses well under 1 s of CPU.
+  to the model to fix it, up to 3 attempts. Then it starts `render-scene` as a child workflow,
+  passing the validation result along so the script isn't checked twice, and returns without
+  waiting: a long-lived task can lose its connection, so only the render stays open while tiles run.
+  `render-scene` publishes `done` (or `error`), and the render API watches whichever run is active.
 - **Framing.** `validate-shape` also returns the shape's visible bounding box, computed with Fidget's
   interval arithmetic (it proves regions empty), in ~2 ms. When the shape is new, `render-scene`
   aims the camera at the box's center and pulls back until all 8 corners fit both fields of view,
@@ -128,14 +146,28 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   position, so a retried tile is identical.
 - **Camera.** Each task's input carries an orbit camera: `target`, `azimuth`, `elevation`, `distance`,
   `fov`, `aperture`, with angles in degrees and a Z-up world. Missing fields use the defaults.
-- **Tile size.** Tiles shrink as samples and bounces grow, keeping each tile's work (pixels × samples ×
+- **Adaptive sampling.** The samples setting is each pixel's maximum. A pixel traces at least 16
+  paths (or 1/16 of the maximum, if more), then 8 at a time until its standard error, measured after
+  gamma, is under 1.5 of 255 steps per channel. Flat areas stop early; edges, soft shadows, glass
+  and smoke use more. On a test scene a 256 cap traces about half its paths, a 1024 cap about a
+  quarter. Sampling stays deterministic per tile, so a retried tile is still identical.
+- **Tile size.** Tiles shrink as (maximum) samples and bounces grow, keeping each tile's work (pixels × samples ×
   (bounces + 1)) near 10M units. That's about 25 s of CPU in the tile Worker for typical scripts;
   more complex scripts cost proportionally more.
 - **Concurrency.** Every tile can be in flight at once. Cloudflare spreads them over isolates, which
   in practice gives about 10–20× parallelism from one render; tiles beyond that wait. Set
   `MAX_CONCURRENT_TILES` on the tile Worker to queue the excess in Hatchet instead.
-- **Cancellation.** Moving the camera, pressing Stop or closing the tab cancels the run and its
-  tiles. The app Worker cancels by a `render_id` metadata tag, which propagates to child runs. The
-  parent also cancels any tiles it spawned after the cancellation arrived.
+- **Retries.** A tile that fails with a 5xx (including Cloudflare killing an overloaded isolate)
+  is retried up to 8 times with exponential backoff (2 s, 4 s, 8 s, 16 s, then every 30 s); 4xx
+  errors such as a bad script are not retried. A tile gives up reading its script after 20 s, so a
+  stalled connection turns into a quick retry instead of a stuck render.
+- **Cancellation.** Moving the camera, starting another render or pressing Stop cancels the run and
+  its tiles (`POST /api/render/<id>/cancel`). The app Worker cancels by a `render_id` metadata tag,
+  which propagates to child runs. The parent also cancels any tiles it spawned after the
+  cancellation arrived. Closing the tab does not cancel: see Resuming.
+- **Resuming.** The page keeps the latest render's ids in `localStorage`. On load it calls
+  `GET /api/render/<id>?run=<runId>`, which replays the render's durable stream from the start
+  (repainting a finished image, or catching up and following one still going), and a dropped
+  connection resumes the same way. Renders are kept for the tenant's stream retention.
 - **Protojson.** Hatchet encodes request bodies with protojson, so `int64` fields such as
   `timestampUnixSeconds` arrive as JSON strings. The endpoint accepts both forms.

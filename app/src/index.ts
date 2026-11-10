@@ -2,6 +2,8 @@
 //
 //   /hatchet/*         Hatchet's serverless endpoint for the orchestration workflows (workflows.ts)
 //   POST /api/render   starts a render and streams its progress back as Server-Sent Events
+//   GET  /api/render/<id>?run=<runId>   replays a render's stream (the page resumes after a reload)
+//   POST /api/render/<id>/cancel        cancels a render
 //   everything else    the page (static assets, public/)
 
 import { cloudflare, type HatchetEnv } from '@hatchet-dev/serverless/cloudflare';
@@ -32,6 +34,14 @@ export default cloudflare<Env>({
       if (typeof job === 'string') return new Response(job, { status: 400 });
       return render(job, env, ctx, req.signal);
     }
+    // /api/render/<renderId>: resume (GET) or cancel (POST .../cancel) a render.
+    const m = url.pathname.match(/^\/api\/render\/([^/]+)(\/cancel)?$/);
+    if (m && req.method === 'GET' && !m[2]) return resume(m[1], url.searchParams.get('run'), env, ctx, req.signal);
+    if (m && req.method === 'POST' && m[2]) {
+      if (!UUID.test(m[1])) return new Response('unknown render', { status: 400 });
+      await cancelRender(hatchetFor(env), m[1]);
+      return new Response(null, { status: 204 });
+    }
     return new Response('Not Found', { status: 404 });
   },
 });
@@ -56,16 +66,74 @@ async function workflowInput(job: Job) {
   return { ...rest, scriptId: await putScript(shape) };
 }
 
+const SSE_HEADERS = { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' };
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Renders run at most an hour (their execution timeout); cancelling looks back a little further. */
+const RENDER_LOOKBACK_MS = 2 * 60 * 60 * 1000;
+
+const hatchetFor = (env: Env) => new HatchetCore({ token: env.HATCHET_CLIENT_TOKEN });
+
+/** Cancels a render and everything it spawned: they share a `render_id` tag, since run metadata propagates to children. */
+function cancelRender(hatchet: HatchetCore, renderId: string) {
+  const since = new Date(Date.now() - RENDER_LOOKBACK_MS);
+  return hatchet.runs
+    .cancel({ filters: { since, additionalMetadata: { render_id: renderId } } })
+    .then(() => undefined)
+    .catch((err) => console.error(`failed to cancel render ${renderId}`, err));
+}
+
 /**
- * Starts the job's workflow and relays its durable stream topic as Server-Sent Events until a
- * `done` or `error` message. If the browser disconnects first, the run and everything it spawned
- * are cancelled; they share a `render_id` tag, since run metadata propagates to children.
+ * POST /api/render: starts the job's workflow and relays its stream (see `relay`). The first event,
+ * `start`, carries the ids the page needs to resume or cancel the render later. A render keeps going
+ * when the browser goes away (the page can come back to it), except before `start` was sent, when
+ * nobody could cancel it: then it is cancelled.
  */
 function render(job: Job, env: Env, ctx: ExecutionContext, disconnected: AbortSignal): Response {
-  const hatchet = new HatchetCore({ token: env.HATCHET_CLIENT_TOKEN });
+  const hatchet = hatchetFor(env);
   const renderId = crypto.randomUUID();
+  let started = false;
+  disconnected.addEventListener('abort', () => {
+    if (!started) ctx.waitUntil(cancelRender(hatchet, renderId));
+  });
+  return relay(hatchet, renderId, ctx, disconnected, async (send) => {
+    const opts = { additionalMetadata: { render_id: renderId } };
+    const ref = await hatchet.runNoWait(workflowFor(job), { ...(await workflowInput(job)), topic: `render-${renderId}` }, opts);
+    const runId = await ref.getWorkflowRunId();
+    started = !disconnected.aborted;
+    if (!started) await cancelRender(hatchet, renderId);
+    send({ type: 'start', renderId, runId });
+    return runId;
+  });
+}
+
+/** GET /api/render/<renderId>?run=<runId>: replays a render's stream from its start, then follows it live. */
+async function resume(renderId: string, runId: string | null, env: Env, ctx: ExecutionContext, disconnected: AbortSignal) {
+  if (!UUID.test(renderId) || !runId || !UUID.test(runId)) return new Response('unknown render', { status: 400 });
+  const hatchet = hatchetFor(env);
+  // Subscribing to an empty topic would wait forever.
+  const stored = await hatchet.streams.topicMetadata(`render-${renderId}`).then((m) => m.messageCount > 0, () => false);
+  if (!stored) return new Response('this render is no longer stored', { status: 404 });
+  return relay(hatchet, renderId, ctx, disconnected, async (send) => {
+    send({ type: 'start', renderId, runId });
+    return runId;
+  });
+}
+
+type Start = { type: 'start'; renderId: string; runId: string };
+
+/**
+ * Relays a render's durable stream topic as Server-Sent Events, from its first message, until a
+ * `done` or `error` message or the browser disconnects. `begin` sends `start` and returns the run
+ * to watch: a run that dies without publishing `error` still ends the stream.
+ */
+function relay(
+  hatchet: HatchetCore,
+  renderId: string,
+  ctx: ExecutionContext,
+  disconnected: AbortSignal,
+  begin: (send: (m: Start) => void) => Promise<string>
+): Response {
   const topic = `render-${renderId}`;
-  const since = new Date(Date.now() - 60_000);
   const reading = new AbortController();
   const encoder = new TextEncoder();
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
@@ -77,22 +145,11 @@ function render(job: Job, env: Env, ctx: ExecutionContext, disconnected: AbortSi
     clearInterval(heartbeat);
     reading.abort();
   };
-  const cancel = () => {
-    if (finished) return;
-    end();
-    ctx.waitUntil(
-      hatchet.runs
-        .cancel({ filters: { since, additionalMetadata: { render_id: renderId } } })
-        .then(() => undefined)
-        .catch((err) => console.error(`failed to cancel render ${renderId}`, err))
-    );
-  };
-  // A failed write also means the browser went away; the heartbeat makes sure one is tried.
+  // A failed write means the browser went away; the heartbeat makes sure one is tried.
   const write = (text: string) => {
-    if (!finished) writer.write(encoder.encode(text)).catch(cancel);
+    if (!finished) writer.write(encoder.encode(text)).catch(end);
   };
-  const send = (message: StreamMessage | { type: 'start'; runId: string }) =>
-    write(`event: ${message.type}\ndata: ${JSON.stringify(message)}\n\n`);
+  const send = (message: StreamMessage | Start) => write(`event: ${message.type}\ndata: ${JSON.stringify(message)}\n\n`);
   const finish = (message: StreamMessage) => {
     if (finished) return;
     send(message);
@@ -100,16 +157,25 @@ function render(job: Job, env: Env, ctx: ExecutionContext, disconnected: AbortSi
     writer.close().catch(() => {});
   };
   const heartbeat = setInterval(() => write(': ping\n\n'), 15_000);
-  disconnected.addEventListener('abort', cancel);
+  disconnected.addEventListener('abort', end);
 
   ctx.waitUntil(
     (async () => {
       try {
-        const opts = { additionalMetadata: { render_id: renderId } };
-        const ref = await hatchet.runNoWait(workflowFor(job), { ...(await workflowInput(job)), topic }, opts);
-        send({ type: 'start', runId: await ref.getWorkflowRunId() });
-        // Safety net: a run that dies without publishing `error` still ends the stream.
-        ref.output.catch((err) => setTimeout(() => finish({ type: 'error', message: describe(err) }), 5000));
+        const runId = await begin(send);
+        // A description run hands the render off to its own run (`renderRunId`); watch that too.
+        const watch = (run: { output: Promise<unknown> }) =>
+          run.output.then(
+            (out) => {
+              // A run's output is keyed by task name.
+              type Out = { renderRunId?: string };
+              const o = out as (Out & Record<string, Out | undefined>) | undefined;
+              const next = o?.['describe-and-render']?.renderRunId ?? o?.renderRunId;
+              if (next) watch(hatchet.runRef(next));
+            },
+            (err) => setTimeout(() => finish({ type: 'error', message: describe(err) }), 5000)
+          );
+        watch(hatchet.runRef(runId));
 
         // `subscribe` ends when the engine hangs up an idle subscription; resume from the cursor.
         let cursor: string | undefined;
@@ -127,5 +193,5 @@ function render(job: Job, env: Env, ctx: ExecutionContext, disconnected: AbortSi
     })()
   );
 
-  return new Response(readable, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+  return new Response(readable, { headers: SSE_HEADERS });
 }

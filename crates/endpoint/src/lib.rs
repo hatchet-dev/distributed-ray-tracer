@@ -7,8 +7,8 @@
 //!
 //! Scripts can be megabytes, too big to copy into every task's input, so tasks carry a script's
 //! id (the SHA-256 of its text, in hex) and the adapter supplies a [`Scripts`] store to load it
-//! from: the durable stream topic the app published it to (see [`scripts`]). Adapters (the Cloudflare Worker in `crates/worker`) only move bytes in and out of
-//! [`handle`].
+//! from: the durable stream topic the app published it to (see [`scripts`]). Adapters (the
+//! Cloudflare Worker in `crates/worker`) only move bytes in and out of [`handle`].
 
 pub mod hatchet;
 pub mod scripts;
