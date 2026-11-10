@@ -37,6 +37,18 @@ pub struct Config<'a> {
     /// Optional cap on one render's tiles in flight, so a big render can't take every slot from
     /// the others. `None` = no per-render cap.
     pub max_tiles_per_render: Option<u32>,
+    /// Whether this endpoint renders tiles. When another endpoint (e.g. the native server)
+    /// renders them, this one declares only `validate-shape`, so Hatchet sends it no tiles.
+    pub serve_render: bool,
+}
+
+/// `serve_render` from the `SERVE_TASKS` setting: a comma-separated list of the tasks to serve
+/// (`render-tile`, `validate-shape`); unset or empty serves both.
+pub fn serves_render(serve_tasks: Option<&str>) -> bool {
+    match serve_tasks.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(list) => list.split(',').any(|t| t.trim() == RENDER),
+    }
 }
 
 pub struct Reply {
@@ -110,7 +122,7 @@ pub async fn handle(
         return error(400, "trigger body has no action", false);
     };
     match action.action_id.as_str() {
-        RENDER_ACTION => render(&action.action_payload, scripts).await,
+        RENDER_ACTION if cfg.serve_render => render(&action.action_payload, scripts).await,
         VALIDATE_ACTION => validate(&action.action_payload, scripts).await,
         _ => error(404, "unknown action", false),
     }
@@ -196,8 +208,9 @@ fn healthcheck(cfg: &Config) -> Value {
         "description": "Check that a shape script parses",
         "tasks": [{ "readableId": VALIDATE, "action": VALIDATE_ACTION, "timeout": "30s", "retries": 2 }],
     });
+    let workflows = if cfg.serve_render { vec![render, validate] } else { vec![validate] };
     json!({
-        "workflows": [render, validate],
+        "workflows": workflows,
         "durable": { "supported": false },
         "runtime": { "name": cfg.runtime_name, "sdkVersion": env!("CARGO_PKG_VERSION") },
     })

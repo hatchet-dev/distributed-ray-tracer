@@ -15,6 +15,12 @@ cpu_ms = 300000
 #   HATCHET_ENDPOINT_ID     optional, rejects requests signed for another endpoint
 #   HATCHET_CLIENT_TOKEN    tenant API token: reads shape scripts from their durable stream topics
 #   HATCHET_ENGINE_URL      optional, the engine's base URL; defaults to the token's address
+#   SERVE_TASKS             optional var, comma-separated tasks to serve (default both)
+
+# Tiles render on the native tile server (crates/server, on Porter); this Worker only checks
+# scripts. Remove SERVE_TASKS (or add render-tile) to render tiles here again.
+[vars]
+SERVE_TASKS = "validate-shape"
 
 [dev]
 port = 8788

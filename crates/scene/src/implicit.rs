@@ -17,13 +17,12 @@ use fidget::{
     eval::{BulkEvaluator, Function, TracingEvaluator},
     shape::{ShapeBulkEval, ShapeTape, ShapeTracingEval},
     types::{Grad, Interval},
-    vm::{VmFunction, VmShape},
 };
 use rand::rngs::StdRng;
 use rpt::{glm, HitRecord, Ray, Shape};
 
-type PointEval = <VmFunction as Function>::PointEval;
-type GradEval = <VmFunction as Function>::GradSliceEval;
+type PointEval = <crate::Func as Function>::PointEval;
+type GradEval = <crate::Func as Function>::GradSliceEval;
 
 /// Region the marcher searches; geometry outside it is not rendered.
 const BOUNDS_MIN: [f64; 3] = [-20.0, -20.0, -2.0];
@@ -76,7 +75,7 @@ const BOUNDS_DEPTH: u32 = 7;
 /// is empty, so subdivide only the boxes that might contain surface or interior.
 /// `None` if the shape is empty there.
 pub fn bounds(tree: Tree) -> Option<([f32; 3], [f32; 3])> {
-    bounds_of(&VmShape::from(tree))
+    bounds_of(&crate::FShape::from(tree))
 }
 
 /// Cells per axis in the acceleration grid over the shape's bounding box.
@@ -107,10 +106,10 @@ struct Grid {
 }
 
 impl Grid {
-    fn build(shape: &VmShape) -> Option<Grid> {
+    fn build(shape: &crate::FShape) -> Option<Grid> {
         let (min, cell) = grid_box(bounds_of(shape)?, GRID);
         let tape = shape.interval_tape(Default::default());
-        let mut eval = VmShape::new_interval_eval();
+        let mut eval = crate::FShape::new_interval_eval();
         let mut workspace = Default::default();
         let mut tapes = Vec::new();
         let cells = grid_cells(min, cell, GRID)
@@ -215,11 +214,11 @@ pub struct ImplicitShape {
 
 impl ImplicitShape {
     pub fn new(tree: Tree) -> Self {
-        let shape = VmShape::from(tree);
+        let shape = crate::FShape::from(tree);
         Self {
             grid: Grid::build(&shape),
             full_grad: shape.grad_slice_tape(Default::default()),
-            evals: Mutex::new((VmShape::new_point_eval(), VmShape::new_grad_slice_eval())),
+            evals: Mutex::new((crate::FShape::new_point_eval(), crate::FShape::new_grad_slice_eval())),
         }
     }
 
@@ -261,7 +260,7 @@ impl ImplicitShape {
 }
 
 /// Bounding box of the visible part of a shape (see [`bounds`]).
-pub(crate) fn bounds_of(shape: &VmShape) -> Option<([f32; 3], [f32; 3])> {
+pub(crate) fn bounds_of(shape: &crate::FShape) -> Option<([f32; 3], [f32; 3])> {
     bounds_within(shape, ([BOUNDS_MIN[0] as f32, BOUNDS_MIN[1] as f32, 0.0], BOUNDS_MAX.map(|v| v as f32)))
 }
 
@@ -269,13 +268,13 @@ pub(crate) fn bounds_of(shape: &VmShape) -> Option<([f32; 3], [f32; 3])> {
 /// floor (for the preview, where a part may yet be moved up).
 pub fn full_bounds(tree: Tree) -> Option<([f32; 3], [f32; 3])> {
     let lo = [-BOUNDS_MAX[0], -BOUNDS_MAX[1], -BOUNDS_MAX[2]];
-    bounds_within(&VmShape::from(tree), (lo.map(|v| v as f32), BOUNDS_MAX.map(|v| v as f32)))
+    bounds_within(&crate::FShape::from(tree), (lo.map(|v| v as f32), BOUNDS_MAX.map(|v| v as f32)))
 }
 
 /// Bounding box of where `shape` may be `<= 0` inside `root`, to [`BOUNDS_DEPTH`] subdivisions.
-fn bounds_within(shape: &VmShape, root: ([f32; 3], [f32; 3])) -> Option<([f32; 3], [f32; 3])> {
+fn bounds_within(shape: &crate::FShape, root: ([f32; 3], [f32; 3])) -> Option<([f32; 3], [f32; 3])> {
     let tape = shape.interval_tape(Default::default());
-    let mut eval = VmShape::new_interval_eval();
+    let mut eval = crate::FShape::new_interval_eval();
     let mut found: Option<([f32; 3], [f32; 3])> = None;
     let mut stack = vec![(root, 0u32)];
     while let Some(((lo, hi), depth)) = stack.pop() {

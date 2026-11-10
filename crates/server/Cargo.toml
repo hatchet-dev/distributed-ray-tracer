@@ -9,7 +9,8 @@ name = "ray-tile-server"
 path = "src/main.rs"
 
 [dependencies]
-endpoint = { path = "../endpoint" }
+# Native code can be generated at runtime here (unlike on Workers): use Fidget's JIT.
+endpoint = { path = "../endpoint", features = ["jit"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }

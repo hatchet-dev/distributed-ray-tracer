@@ -16,10 +16,13 @@ build:
 
 env:
   PORT: "8080"
-  # Tiles in flight across all renders: about the total cores (instances x cpuCores).
-  MAX_CONCURRENT_TILES: "8"
-  # One render's tiles in flight, so several renders share the cores instead of queueing.
-  MAX_TILES_PER_RENDER: "6"
+  # Tiles in flight across all renders. Each tile renders on one core, so about the total cores
+  # (instances x cpuCores): more only slows every tile down, and heavy scenes' tiles then run
+  # past the 300 s task timeout.
+  MAX_CONCURRENT_TILES: "16"
+  # One render's tiles in flight: a render alone gets most of the cores, and a second render
+  # started meanwhile still gets the rest instead of queueing behind the first.
+  MAX_TILES_PER_RENDER: "12"
 
 envGroups:
   - ray-tile-secrets
@@ -31,8 +34,9 @@ services:
     port: 8080
     # Each pod renders about as many tiles at once as it has cores: keep MAX_CONCURRENT_TILES
     # near instances x cpuCores when changing these.
-    cpuCores: 3.5
-    ramMegabytes: 2048
+    # A 16-core node: two pods of 7 cores, leaving room for the node's own system pods.
+    cpuCores: 7
+    ramMegabytes: 4096
     instances: 2
     healthCheck:
       enabled: true

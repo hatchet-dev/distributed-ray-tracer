@@ -28,14 +28,13 @@ use fidget::{
     eval::{BulkEvaluator, Function, MathFunction, Tape, TracingEvaluator},
     types::Grad,
     var::Var,
-    vm::VmFunction,
 };
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, Map, AST};
 use rpt::{glm, Color, Material};
 
-type PointEval = <VmFunction as Function>::PointEval;
+type PointEval = <crate::Func as Function>::PointEval;
 type PointTape = <PointEval as TracingEvaluator>::Tape;
-type GradEval = <VmFunction as Function>::GradSliceEval;
+type GradEval = <crate::Func as Function>::GradSliceEval;
 type GradTape = <GradEval as BulkEvaluator>::Tape;
 
 /// Most operations a compiled shader may have: every hit evaluates all of them.
@@ -206,10 +205,10 @@ struct Bump {
 }
 
 /// Compiles `trees` as one function (one output each), checking its size.
-fn compile(trees: &[&Tree]) -> Result<VmFunction, String> {
+fn compile(trees: &[&Tree]) -> Result<crate::Func, String> {
     let mut ctx = Context::new();
     let nodes: Vec<_> = trees.iter().map(|t| ctx.import(t)).collect();
-    let f = VmFunction::new(&ctx, &nodes).map_err(|e| format!("could not compile the shader: {e:?}"))?;
+    let f = crate::Func::new(&ctx, &nodes).map_err(|e| format!("could not compile the shader: {e:?}"))?;
     if f.size() > MAX_SHADER_OPS {
         return Err(format!(
             "the shader is too complex ({} operations; at most {MAX_SHADER_OPS}): use fewer noise layers or loop iterations",
@@ -234,7 +233,7 @@ impl Shader {
             Some(height) => {
                 let tape = compile(&[height])?.grad_slice_tape(Default::default());
                 let (slots, vars) = slots(&tape.vars());
-                Some(Bump { tape, slots, vars, eval: Mutex::new(VmFunction::new_grad_slice_eval()) })
+                Some(Bump { tape, slots, vars, eval: Mutex::new(crate::Func::new_grad_slice_eval()) })
             }
             None => None,
         };
@@ -243,7 +242,7 @@ impl Shader {
             fields: spec.fields.iter().map(|(f, _)| *f).collect(),
             slots: point_slots,
             vars: point_vars,
-            eval: Mutex::new(VmFunction::new_point_eval()),
+            eval: Mutex::new(crate::Func::new_point_eval()),
             bump,
         })
     }

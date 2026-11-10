@@ -112,6 +112,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         runtime_name: "rust-cloudflare-workers",
         max_concurrent_tiles: var("MAX_CONCURRENT_TILES").and_then(|v| v.parse().ok()),
         max_tiles_per_render: var("MAX_TILES_PER_RENDER").and_then(|v| v.parse().ok()),
+        serve_render: endpoint::serves_render(var("SERVE_TASKS").as_deref()),
     };
     let signature = req.headers().get("X-Hatchet-Signature")?.unwrap_or_default();
     let body = req.bytes().await?;

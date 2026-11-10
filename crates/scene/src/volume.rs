@@ -22,14 +22,13 @@ use fidget::{
     context::Tree,
     eval::{Function, TracingEvaluator},
     shape::{ShapeTape, ShapeTracingEval},
-    vm::{VmFunction, VmShape},
 };
 use rand::{rngs::StdRng, Rng};
 use rpt::{glm, Color, Ray};
 
 use crate::implicit::{bounds_of, clip_box, exit_time, grid_box, grid_cells};
 
-type PointEval = <VmFunction as Function>::PointEval;
+type PointEval = <crate::Func as Function>::PointEval;
 type PointTape = ShapeTape<<PointEval as TracingEvaluator>::Tape>;
 
 /// Densities above this are clamped (keeps majorants finite and marching bounded).
@@ -99,16 +98,16 @@ pub struct Volume {
 /// Bounding box of where `density > 0` could hold (above the floor), via Fidget's intervals.
 pub fn density_bounds(density: &Tree) -> Option<([f32; 3], [f32; 3])> {
     // `bounds_of` finds where a shape is <= 0, so negate: -density <= 0 where density >= 0.
-    bounds_of(&VmShape::from(-density.clone()))
+    bounds_of(&crate::FShape::from(-density.clone()))
 }
 
 impl Volume {
     /// `None` when the volume is empty everywhere visible.
     pub fn new(spec: VolumeSpec) -> Option<Volume> {
         let (min, cell) = grid_box(density_bounds(&spec.density)?, GRID);
-        let shape = VmShape::from(spec.density);
+        let shape = crate::FShape::from(spec.density);
         let itape = shape.interval_tape(Default::default());
-        let mut ieval = VmShape::new_interval_eval();
+        let mut ieval = crate::FShape::new_interval_eval();
         let majorants = grid_cells(min, cell, GRID)
             .map(|iv| match ieval.eval(&itape, iv[0], iv[1], iv[2]) {
                 Ok((v, _)) if !v.upper().is_nan() => f64::from(v.upper()).clamp(0.0, MAX_DENSITY),
@@ -118,7 +117,7 @@ impl Volume {
 
         let emission = spec.temperature.map(|t| match t {
             Temperature::Constant(k) => (None, k),
-            Temperature::Field(t) => (Some(VmShape::from(t).point_tape(Default::default())), 0.0),
+            Temperature::Field(t) => (Some(crate::FShape::from(t).point_tape(Default::default())), 0.0),
         });
         let albedo = spec.albedo.unwrap_or_else(|| glm::vec3(0.0, 0.0, 0.0)).map(|c| c.clamp(0.0, 1.0));
         Some(Volume {
@@ -131,7 +130,7 @@ impl Volume {
             min,
             cell,
             majorants,
-            evals: Mutex::new(VmShape::new_point_eval()),
+            evals: Mutex::new(crate::FShape::new_point_eval()),
         })
     }
 

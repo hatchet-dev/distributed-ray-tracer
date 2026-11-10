@@ -6,6 +6,15 @@
 mod implicit;
 mod parts;
 pub mod preview;
+
+/// Fidget's evaluator: its JIT (native code, several times faster) where code can be generated
+/// at runtime, as in the native tile server; its interpreter elsewhere, as on Cloudflare Workers,
+/// which forbid runtime code generation (the `jit` feature selects).
+#[cfg(feature = "jit")]
+pub(crate) type Func = fidget::jit::JitFunction;
+#[cfg(not(feature = "jit"))]
+pub(crate) type Func = fidget::vm::VmFunction;
+pub(crate) type FShape = fidget::shape::Shape<Func>;
 mod shader;
 mod tracer;
 mod volume;
@@ -522,8 +531,8 @@ mod tests {
         let part = &spec.parts[0];
         for corner in [[1.0, 2.0, 3.0], [1.0, 0.0, 0.0], [0.0, 2.0, 3.0]] {
             let w = parts::to_world(part.at, part.rotate, corner);
-            let mut eval = fidget::vm::VmShape::new_point_eval();
-            let shape = fidget::vm::VmShape::from(part.tree.clone());
+            let mut eval = FShape::new_point_eval();
+            let shape = FShape::from(part.tree.clone());
             let tape = shape.point_tape(Default::default());
             let (v, _) = eval.eval(&tape, w[0] as f32, w[1] as f32, w[2] as f32).unwrap();
             assert!(v.abs() < 1e-4, "corner {corner:?} at {w:?}: {v}");
