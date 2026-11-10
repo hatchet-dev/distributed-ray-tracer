@@ -8,7 +8,8 @@
 //!   HATCHET_CLIENT_TOKEN    tenant API token: reads shape scripts from their topics
 //!   HATCHET_ENDPOINT_ID     optional, rejects requests signed for another endpoint
 //!   HATCHET_ENGINE_URL      optional, the engine's base URL; defaults to the token's address
-//!   MAX_CONCURRENT_TILES    optional, declared to Hatchet as the tiles' concurrency limit
+//!   MAX_CONCURRENT_TILES    optional, tiles in flight across all renders (about the total cores)
+//!   MAX_TILES_PER_RENDER    optional, one render's tiles in flight, so renders share the cores
 //!
 //! Tiles render on blocking threads, so many can run at once across the machine's cores.
 
@@ -35,6 +36,7 @@ struct Settings {
     signing_secret: String,
     endpoint_id: Option<String>,
     max_concurrent_tiles: Option<u32>,
+    max_tiles_per_render: Option<u32>,
     token: Option<String>,
     engine: Option<String>,
 }
@@ -121,6 +123,7 @@ async fn hatchet(State(app): State<Arc<App>>, uri: Uri, headers: HeaderMap, body
             endpoint_id: s.endpoint_id.as_deref(),
             runtime_name: "rust-native",
             max_concurrent_tiles: s.max_concurrent_tiles,
+            max_tiles_per_render: s.max_tiles_per_render,
         };
         runtime.block_on(handle(&path, &signature, &body, &cfg, now, &StreamScripts(&app)))
     })
@@ -144,6 +147,7 @@ async fn main() {
         signing_secret,
         endpoint_id: var("HATCHET_ENDPOINT_ID"),
         max_concurrent_tiles: var("MAX_CONCURRENT_TILES").and_then(|v| v.parse().ok()),
+        max_tiles_per_render: var("MAX_TILES_PER_RENDER").and_then(|v| v.parse().ok()),
         token,
         engine,
     };

@@ -31,9 +31,12 @@ pub struct Config<'a> {
     pub endpoint_id: Option<&'a str>,
     /// Shown on the endpoint in the Hatchet dashboard.
     pub runtime_name: &'a str,
-    /// Optional cap on tiles rendering at once, declared to Hatchet as workflow concurrency
-    /// so the excess waits in Hatchet's queue. `None` = every tile at once.
+    /// Optional cap on tiles rendering at once across all renders, declared to Hatchet as
+    /// workflow concurrency so the excess waits in Hatchet's queue. `None` = no overall cap.
     pub max_concurrent_tiles: Option<u32>,
+    /// Optional cap on one render's tiles in flight, so a big render can't take every slot from
+    /// the others. `None` = no per-render cap.
+    pub max_tiles_per_render: Option<u32>,
 }
 
 pub struct Reply {
@@ -155,6 +158,24 @@ async fn render(payload: &str, scripts: &impl Scripts) -> Reply {
     }
 }
 
+/// The tiles' concurrency chain; a tile runs once it passes every entry, in order.
+/// 1. Per render (round-robin over renders): one render's tiles in flight, keyed by the
+///    `render_id` the app tags every run with (metadata propagates to children). Tiles of
+///    several renders then share the slots instead of the oldest render taking all of them.
+/// 2. Overall: every tile of every render, so the renderer's machines aren't oversubscribed.
+fn tile_concurrency(cfg: &Config) -> Option<Value> {
+    let rr = "GROUP_ROUND_ROBIN";
+    let mut chain = vec![];
+    if let Some(max_runs) = cfg.max_tiles_per_render {
+        let key = "has(additional_metadata.render_id) ? additional_metadata.render_id : 'none'";
+        chain.push(json!({ "expression": key, "maxRuns": max_runs, "limitStrategy": rr }));
+    }
+    if let Some(max_runs) = cfg.max_concurrent_tiles {
+        chain.push(json!({ "expression": "'tiles'", "maxRuns": max_runs, "limitStrategy": rr }));
+    }
+    (!chain.is_empty()).then(|| Value::Array(chain))
+}
+
 fn healthcheck(cfg: &Config) -> Value {
     let mut render = json!({
         "name": RENDER,
@@ -167,10 +188,8 @@ fn healthcheck(cfg: &Config) -> Value {
             "retries": 8, "backoffFactor": 2.0, "backoffMaxSeconds": 30,
         }],
     });
-    if let Some(max_runs) = cfg.max_concurrent_tiles {
-        // One group for every tile of every render: a global in-flight cap.
-        render["concurrencyArr"] =
-            json!([{ "expression": "'tiles'", "maxRuns": max_runs, "limitStrategy": "GROUP_ROUND_ROBIN" }]);
+    if let Some(chain) = tile_concurrency(cfg) {
+        render["concurrencyArr"] = chain;
     }
     let validate = json!({
         "name": VALIDATE,

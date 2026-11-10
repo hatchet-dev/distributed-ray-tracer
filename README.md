@@ -195,8 +195,13 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   (bounces + 1)) near 10M units. That's about 25 s of CPU in the tile Worker for typical scripts;
   more complex scripts cost proportionally more.
 - **Concurrency.** Every tile can be in flight at once. Cloudflare spreads them over isolates, which
-  in practice gives about 10–20× parallelism from one render; tiles beyond that wait. Set
-  `MAX_CONCURRENT_TILES` on the tile Worker to queue the excess in Hatchet instead.
+  in practice gives about 10–20× parallelism from one render; tiles beyond that wait. On a fixed
+  set of machines (the native tile server, `porter.yaml`), the tile endpoint declares a two-step
+  concurrency chain to Hatchet: `MAX_TILES_PER_RENDER` caps one render's tiles in flight (keyed
+  by its `render_id`, round-robin across renders, so a big render can't starve a small one), and
+  `MAX_CONCURRENT_TILES` caps all tiles together, near the machines' total cores. The excess
+  waits in Hatchet's queue. Since the native server is several times faster than the Worker,
+  set `TILE_WORK` and `TILE_MAX_SIZE` on the app (see `app/wrangler.toml`) for bigger tiles.
 - **Retries.** A tile that fails with a 5xx (including Cloudflare killing an overloaded isolate)
   is retried up to 8 times with exponential backoff (2 s, 4 s, 8 s, 16 s, then every 30 s); 4xx
   errors such as a bad script are not retried. A tile gives up reading its script after 20 s, so a

@@ -1,6 +1,7 @@
 import { clientFromContext, hatchet } from '@hatchet-dev/serverless';
 import { ScriptWriter } from './describe';
 import { getImage, getScript, putScript } from './scripts';
+import { secret } from './env';
 import {
   describe,
   type Camera,
@@ -18,12 +19,19 @@ const SPAWN_CHUNK = 500;
 /** Description -> script attempts before giving up (the first plus repairs). */
 const SCRIPT_ATTEMPTS = 3;
 /**
- * Work budget per tile, in pixels x samples x (bounces + 1). Ray-marching a Fidget shape costs
- * ~2.4 us per unit in the tile Worker's wasm (measured with the gyroid example), so this keeps a
- * typical tile around 25 s of CPU, well inside that Worker's 300 s limit and the endpoint's
- * 300 s request timeout. More complex scripts cost proportionally more.
+ * Default work budget per tile, in pixels x samples x (bounces + 1). Ray-marching a Fidget shape
+ * costs ~2.4 us per unit in the tile Worker's wasm (measured with the gyroid example), so this
+ * keeps a typical tile around 25 s of CPU, well inside that Worker's 300 s limit and the
+ * endpoint's 300 s request timeout. More complex scripts cost proportionally more. The native
+ * tile server (crates/server) is several times faster, so it can take bigger tiles:
+ * TILE_WORK and TILE_MAX_SIZE (vars on the app) override these.
  */
 const WORK_PER_TILE = 10_000_000;
+const MAX_TILE_SIZE = 64;
+const numberVar = (name: string, fallback: number) => {
+  const v = Number(secret(name));
+  return Number.isFinite(v) && v > 0 ? v : fallback;
+};
 /** Matches `CameraParams::default()` in crates/scene. */
 const DEFAULT_FOV = 39.6;
 
@@ -46,10 +54,10 @@ async function validate(ctx: Ctx, scriptId: string): Promise<Validation> {
   }
 }
 
-/** Square tile side in pixels for these settings: a multiple of 8 between 8 and 64. */
+/** Square tile side in pixels for these settings: a multiple of 8 between 8 and TILE_MAX_SIZE (64). */
 export function tileSize({ samples, bounces }: { samples: number; bounces: number }) {
-  const side = Math.sqrt(WORK_PER_TILE / (samples * (bounces + 1)));
-  return Math.min(64, Math.max(8, Math.floor(side / 8) * 8));
+  const side = Math.sqrt(numberVar('TILE_WORK', WORK_PER_TILE) / (samples * (bounces + 1)));
+  return Math.min(numberVar('TILE_MAX_SIZE', MAX_TILE_SIZE), Math.max(8, Math.floor(side / 8) * 8));
 }
 
 /** Matches `CameraParams::default()` in crates/scene. */

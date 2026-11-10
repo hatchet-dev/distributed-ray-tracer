@@ -1,0 +1,46 @@
+# The tile renderer (crates/server: render-tile, validate-shape) on Porter. The app (page,
+# render API, orchestration workflows) stays on Cloudflare.
+#
+# Secrets go in a Porter environment group, created before the first deploy:
+#   ray-tile-secrets: HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN
+# Then register https://<this service's domain>/hatchet/healthcheck and /hatchet/trigger with
+# Hatchet as a GENERIC_HTTP endpoint (requestTimeoutSeconds >= 300), and disable the Cloudflare
+# tile endpoint, or both will be sent tiles.
+version: v2
+name: ray-tile-server
+
+build:
+  method: docker
+  context: .
+  dockerfile: ./deploy/tile.Dockerfile
+
+env:
+  PORT: "8080"
+  # Tiles in flight across all renders: about the total cores (instances x cpuCores).
+  MAX_CONCURRENT_TILES: "8"
+  # One render's tiles in flight, so several renders share the cores instead of queueing.
+  MAX_TILES_PER_RENDER: "6"
+
+envGroups:
+  - ray-tile-secrets
+
+services:
+  - name: tiles
+    type: web
+    run: ray-tile-server
+    port: 8080
+    # Each pod renders about as many tiles at once as it has cores: keep MAX_CONCURRENT_TILES
+    # near instances x cpuCores when changing these.
+    cpuCores: 3.5
+    ramMegabytes: 2048
+    instances: 2
+    healthCheck:
+      enabled: true
+      httpPath: /healthz
+      timeoutSeconds: 2
+      initialDelaySeconds: 2
+    ingressAnnotations:
+      # A tile may take up to the task's 300 s timeout; ingress-nginx cuts requests at 60 s by default.
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "330"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "330"
+    terminationGracePeriodSeconds: 330
