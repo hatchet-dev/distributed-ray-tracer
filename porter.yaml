@@ -28,7 +28,7 @@ envGroups:
   - ray-tile-secrets
 
 services:
-  - name: tiles
+  - name: web
     type: web
     run: ray-tile-server
     port: 8080
