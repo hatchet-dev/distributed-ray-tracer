@@ -30,7 +30,7 @@ updates as you edit the script. Drag the background to orbit the view, shift-dra
 zoom; arrow keys walk the view around (shift+arrows turn and tilt it). The render camera is an object in the scene, drawn with its frustum: click it to move it (W)
 or turn it (E; left/right and up/down, since the renderer's camera is always level), and the next
 render is taken from there. Once placed by hand, renders keep the camera where it is instead of
-re-framing it on the shape (a new chat frames afresh). "Look through camera" (C) shows exactly what
+re-framing it on the shape (a new chat frames afresh). "Camera view" (C) shows exactly what
 the render will frame; then dragging and scrolling orbit and zoom the render camera itself.
 
 Parts with a `label` and an `at: [x, y, z]` can be moved and turned: click one (or its label), then

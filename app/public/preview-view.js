@@ -8,7 +8,7 @@
 //   text move and turn together.
 // - Click the camera to move it (W) or turn it (E): the next render is taken from there. It turns
 //   left/right and up/down only (the renderer's camera is always level).
-// - Look through the camera (C) to see exactly what the render frames; then dragging and scrolling
+// - Camera view (C) looks through the camera to see exactly what the render frames; then dragging and scrolling
 //   orbit and zoom the render camera itself.
 import * as THREE from 'three';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
@@ -266,9 +266,19 @@ function setTool(next) {
   tc.setSpace(rotate && selected === CAMERA ? 'local' : 'world');
   tc.showZ = !(rotate && selected === CAMERA);
   document.querySelectorAll('[data-tool]').forEach((b) => {
-    if (b.dataset.tool === 'look') return b.setAttribute('aria-pressed', String(lookThrough));
+    // The button names the view it switches to; looking through the camera, there's nothing
+    // to move or turn (dragging orbits the camera itself), so those buttons go away.
+    if (b.dataset.tool === 'look') {
+      b.textContent = lookThrough ? 'World view' : 'Camera view';
+      b.title = lookThrough ? 'Back to the scene, with the camera as an object you can move (C)' : 'See exactly what the render will frame (C)';
+      return;
+    }
+    // Move and Turn appear only while something is selected (and Turn only if its turn can be
+    // written into the script), rather than sitting there grayed out.
+    const cantTurn = b.dataset.tool === 'rotate' && selected !== CAMERA && !!selected && !turnable(selected);
+    b.hidden = lookThrough || !selected || cantTurn;
+    b.disabled = false;
     b.setAttribute('aria-pressed', String(!!selected && b.dataset.tool === (rotate ? 'rotate' : 'translate')));
-    b.disabled = !selected || (selected === CAMERA && lookThrough) || (b.dataset.tool === 'rotate' && selected !== CAMERA && !turnable(selected));
   });
   requestRender();
 }
