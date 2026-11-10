@@ -16,7 +16,7 @@ command = "../scripts/build-preview.sh"
 watch_dir = "../crates"
 
 # Tiles are spread over a few render tasks (RENDER_TASKS, default 16: about the tile
-# server's cores), so tile size (TILE_MAX_SIZE, default 64) no longer sets how many tasks
+# server's cores), so tile size (TILE_MAX_SIZE, default 16) no longer sets how many tasks
 # Hatchet hands out; smaller tiles balance the tasks better.
 
 [limits]

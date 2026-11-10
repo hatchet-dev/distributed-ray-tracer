@@ -35,7 +35,11 @@ const SCRIPT_ATTEMPTS = 3;
  * TILE_WORK and TILE_MAX_SIZE (vars on the app) override these.
  */
 const WORK_PER_TILE = 10_000_000;
-const MAX_TILE_SIZE = 64;
+/**
+ * Small tiles: they're dealt round-robin to the render tasks, so smaller tiles even out the
+ * tasks' work better (and the image fills in more finely as tasks finish).
+ */
+const MAX_TILE_SIZE = 16;
 const numberVar = (name: string, fallback: number) => {
   const v = Number(secret(name));
   return Number.isFinite(v) && v > 0 ? v : fallback;
@@ -62,7 +66,7 @@ async function validate(ctx: Ctx, scriptId: string): Promise<Validation> {
   }
 }
 
-/** Square tile side in pixels for these settings: a multiple of 8 between 8 and TILE_MAX_SIZE (64). */
+/** Square tile side in pixels for these settings: a multiple of 8 between 8 and TILE_MAX_SIZE (16). */
 export function tileSize({ samples, bounces }: { samples: number; bounces: number }) {
   const side = Math.sqrt(numberVar('TILE_WORK', WORK_PER_TILE) / (samples * (bounces + 1)));
   return Math.min(numberVar('TILE_MAX_SIZE', MAX_TILE_SIZE), Math.max(8, Math.floor(side / 8) * 8));

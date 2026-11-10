@@ -7,8 +7,11 @@
 //! stitch into exactly the frame `Renderer::render` would frame.
 //! rpt's license is reproduced in THIRD_PARTY_NOTICES.md.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use rpt::{color_bytes, glm, Color, HitRecord, Light, Material, Ray, Scene, Shape};
+use rpt::{color_bytes, glm, Camera, Color, HitRecord, Light, Material, Ray, Scene, Shape};
 
 use crate::{
     shader::Shader,
@@ -48,6 +51,26 @@ pub fn render_tile(params: &RenderParams, tile: &Tile) -> Result<Vec<u8>, String
     render_tile_counted(params, tile).map(|(rgb, _)| rgb)
 }
 
+thread_local! {
+    /// The last scene this thread built, with the script it came from. Building parses the
+    /// script and compiles its shapes, simplified tapes and interval grids (and shaders); a
+    /// render's tasks, and later renders of the same script from other angles or at other
+    /// settings, reuse all of it. Per thread, since the scene's evaluators keep scratch state
+    /// that threads would otherwise contend on.
+    static LAST_SCENE: RefCell<Option<(String, Rc<crate::Built>)>> = const { RefCell::new(None) };
+}
+
+/// The scene for `params`' script: this thread's last one if it's the same script.
+fn scene_for(params: &RenderParams) -> Result<Rc<crate::Built>, String> {
+    let cached = LAST_SCENE.with_borrow(|last| last.as_ref().filter(|(script, _)| *script == params.shape).map(|(_, b)| b.clone()));
+    if let Some(built) = cached {
+        return Ok(built);
+    }
+    let built = Rc::new(crate::build_scene(params)?);
+    LAST_SCENE.with_borrow_mut(|last| *last = Some((params.shape.clone(), built.clone())));
+    Ok(built)
+}
+
 /// Render several tiles of one image, building the scene once, and hand each to `each` as soon
 /// as it's done (in order). Stops at the first error, from the script or from `each`.
 pub fn render_tiles(
@@ -55,7 +78,7 @@ pub fn render_tiles(
     tiles: &[Tile],
     mut each: impl FnMut(&Tile, Vec<u8>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let built = crate::build_scene(params)?;
+    let built = scene_for(params)?;
     for tile in tiles {
         let (rgb, _) = render_built(&built, params, tile);
         each(tile, rgb)?;
@@ -71,47 +94,65 @@ pub(crate) fn render_tile_counted(params: &RenderParams, tile: &Tile) -> Result<
 
 /// One tile of an already built scene: packed sRGB bytes and the number of paths traced.
 fn render_built(built: &crate::Built, params: &RenderParams, tile: &Tile) -> (Vec<u8>, u64) {
-    let camera = params.camera.camera();
-    let tracer = Tracer {
-        scene: &built.scene,
-        volumes: &built.volumes,
-        shaders: &built.shaders,
-        sky: built.sky.as_ref(),
-        void_floor: built.void_floor,
-        hidden_sky: built.hidden_sky,
-        max_bounces: params.bounces,
-    };
+    let shade = Shade::new(built, params);
     // Seeded from the tile position, so a retried tile renders identically.
     let mut rng = StdRng::seed_from_u64((u64::from(tile.y) << 32) | u64::from(tile.x));
-
-    let (width, height) = (params.width, params.height);
-    let dim = width.max(height) as f64;
-    let first = min_samples(params.samples);
     let mut traced = 0u64;
     let mut out = Vec::with_capacity((tile.w * tile.h * 3) as usize);
     for y in tile.y..tile.y + tile.h {
         for x in tile.x..tile.x + tile.w {
-            // Normalized to rpt's [-1, 1] box over the longer dimension.
-            let xn = ((2 * x + 1) as f64 - width as f64) / dim;
-            let yn = ((2 * (height - y) - 1) as f64 - height as f64) / dim;
-            let mut pixel = Pixel::default();
-            let mut target = first;
-            loop {
-                while pixel.n < target {
-                    let dx = rng.gen_range((-1.0 / dim)..(1.0 / dim));
-                    let dy = rng.gen_range((-1.0 / dim)..(1.0 / dim));
-                    pixel.add(tracer.trace(camera.cast_ray(xn + dx, yn + dy, &mut rng), 0, true, &mut rng));
-                }
-                if target >= params.samples || pixel.converged() {
-                    break;
-                }
-                target = (target + BATCH).min(params.samples);
-            }
-            traced += u64::from(pixel.n);
-            out.extend(color_bytes(&pixel.mean()));
+            let (rgb, n) = shade.pixel(x, y, &mut rng);
+            traced += u64::from(n);
+            out.extend(rgb);
         }
     }
     (out, traced)
+}
+
+/// What every pixel of one image shares: the tracer, the camera and the sampling settings.
+struct Shade<'a> {
+    tracer: Tracer<'a>,
+    camera: Camera,
+    params: &'a RenderParams,
+}
+
+impl<'a> Shade<'a> {
+    fn new(built: &'a crate::Built, params: &'a RenderParams) -> Self {
+        let tracer = Tracer {
+            scene: &built.scene,
+            volumes: &built.volumes,
+            shaders: &built.shaders,
+            sky: built.sky.as_ref(),
+            void_floor: built.void_floor,
+            hidden_sky: built.hidden_sky,
+            max_bounces: params.bounces,
+        };
+        Shade { tracer, camera: params.camera.camera(), params }
+    }
+
+    /// Pixel (x, y), sampled until it converges or reaches the maximum: its sRGB bytes and the
+    /// number of paths traced.
+    fn pixel(&self, x: u32, y: u32, rng: &mut StdRng) -> ([u8; 3], u32) {
+        let (width, height) = (self.params.width, self.params.height);
+        let dim = width.max(height) as f64;
+        // Normalized to rpt's [-1, 1] box over the longer dimension.
+        let xn = ((2 * x + 1) as f64 - width as f64) / dim;
+        let yn = ((2 * (height - y) - 1) as f64 - height as f64) / dim;
+        let mut pixel = Pixel::default();
+        let mut target = min_samples(self.params.samples);
+        loop {
+            while pixel.n < target {
+                let dx = rng.gen_range((-1.0 / dim)..(1.0 / dim));
+                let dy = rng.gen_range((-1.0 / dim)..(1.0 / dim));
+                pixel.add(self.tracer.trace(self.camera.cast_ray(xn + dx, yn + dy, rng), 0, true, rng));
+            }
+            if target >= self.params.samples || pixel.converged() {
+                break;
+            }
+            target = (target + BATCH).min(self.params.samples);
+        }
+        (color_bytes(&pixel.mean()), pixel.n)
+    }
 }
 
 /// One pixel's running sums, per channel, for its mean and variance.
