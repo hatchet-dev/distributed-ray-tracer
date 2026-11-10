@@ -12,10 +12,18 @@ import {
 } from './messages';
 
 /** Served by the Rust endpoint (crates/endpoint). */
-const RENDER_TILE = 'render-tile';
+const RENDER_TILES = 'render-tiles';
 const VALIDATE_SHAPE = 'validate-shape';
-/** Hatchet's bulk-spawn accepts a bounded batch, so children are spawned in chunks. */
-const SPAWN_CHUNK = 500;
+/**
+ * Render tasks per render: each renders on one core, so about the tile server's total cores.
+ * RENDER_TASKS (a var on the app) overrides it.
+ */
+const RENDER_TASKS = 16;
+/**
+ * Most image bytes one task returns (its tiles' packed RGB; base64 adds a third): task outputs
+ * travel through Hatchet in one message, so big images get more tasks.
+ */
+const MAX_TASK_BYTES = 1_500_000;
 /** Description -> script attempts before giving up (the first plus repairs). */
 const SCRIPT_ATTEMPTS = 3;
 /**
@@ -38,7 +46,7 @@ const DEFAULT_FOV = 39.6;
 type Tile = { x: number; y: number; w: number; h: number };
 type Bounds = NonNullable<Validation['bounds']>;
 /** A workflow run's output is keyed by task name. */
-type TileRunOutput = { [RENDER_TILE]: Tile & { rgb: string } };
+type TilesRunOutput = { [RENDER_TILES]: { tiles: (Tile & { rgb: string })[] } };
 type Ctx = Parameters<typeof clientFromContext>[0];
 
 const publish = (ctx: Ctx, topic: string, msg: StreamMessage) =>
@@ -148,41 +156,42 @@ export const renderScene = hatchet.task({
       await publish(ctx, topic, { type: 'render', tiles: tiles.length, tileSize: size });
       await publish(ctx, topic, { type: 'status', message: `Rendering ${tiles.length} tiles…` });
 
-      // When this run is cancelled, cancel every tile it spawned, including any batch whose
-      // spawn was already in flight when the cancellation arrived.
-      const spawned: string[] = [];
-      const cancelTiles = (ids: string[]) =>
-        ids.length
-          ? clientFromContext(ctx).runs.cancel({ ids }).catch((err) => console.error('failed to cancel tiles', err))
-          : undefined;
-      ctx.abortController.signal.addEventListener('abort', () => cancelTiles(spawned));
+      // A few tasks, each with tiles spread over the image (task k takes every n-th tile from
+      // the k-th), so they get similar mixes of cheap and costly areas and finish together.
+      const bytes = params.width * params.height * 3;
+      const n = Math.min(tiles.length, Math.max(numberVar('RENDER_TASKS', RENDER_TASKS), Math.ceil(bytes / MAX_TASK_BYTES)));
+      const tasks = Array.from({ length: n }, (_, k) => tiles.filter((_, i) => i % n === k));
 
-      const done: Promise<void>[] = [];
-      for (let i = 0; i < tiles.length; i += SPAWN_CHUNK) {
-        const refs = await ctx.bulkRunNoWaitChildren<typeof params & Tile & { scriptId: string }, TileRunOutput>(
-          tiles.slice(i, i + SPAWN_CHUNK).map((tile) => ({ workflow: RENDER_TILE, input: { ...params, ...tile, scriptId } }))
-        );
-        const ids = await Promise.all(refs.map((ref) => ref.getWorkflowRunId()));
-        spawned.push(...ids);
-        if (ctx.cancelled) {
-          await cancelTiles(ids);
-          throw new Error('render cancelled');
-        }
-        for (const ref of refs) {
-          const streamed = ref.output.then(async ({ [RENDER_TILE]: tile }) => {
-            if (!tile?.rgb) throw new Error('a tile run finished without output');
-            await publish(ctx, topic, { type: 'tile', ...tile });
-          });
-          // Mark handled now: if the render is cancelled mid-spawn, these reject before
-          // Promise.allSettled below is reached, which would otherwise be unhandled.
-          streamed.catch(() => {});
-          done.push(streamed);
-        }
+      // When this run is cancelled, cancel every task it spawned, including any whose spawn was
+      // already in flight when the cancellation arrived.
+      const spawned: string[] = [];
+      const cancelTasks = (ids: string[]) =>
+        ids.length
+          ? clientFromContext(ctx).runs.cancel({ ids }).catch((err) => console.error('failed to cancel render tasks', err))
+          : undefined;
+      ctx.abortController.signal.addEventListener('abort', () => cancelTasks(spawned));
+
+      const refs = await ctx.bulkRunNoWaitChildren<typeof params & { tiles: Tile[]; scriptId: string }, TilesRunOutput>(
+        tasks.map((part) => ({ workflow: RENDER_TILES, input: { ...params, tiles: part, scriptId } }))
+      );
+      const ids = await Promise.all(refs.map((ref) => ref.getWorkflowRunId()));
+      spawned.push(...ids);
+      if (ctx.cancelled) {
+        await cancelTasks(ids);
+        throw new Error('render cancelled');
       }
+      // Each task's tiles go to the stream when it finishes.
+      const done = refs.map((ref, k) =>
+        ref.output.then(async ({ [RENDER_TILES]: out }) => {
+          if (out?.tiles?.length !== tasks[k].length) throw new Error('a render task finished without all its tiles');
+          // All at once: the client batches publishes to a topic, in order.
+          await Promise.all(out.tiles.map((tile) => publish(ctx, topic, { type: 'tile', ...tile })));
+        })
+      );
 
       const failed = (await Promise.allSettled(done)).filter((r) => r.status === 'rejected');
       if (failed.length) {
-        throw new Error(`${failed.length} of ${tiles.length} tiles failed: ${describe(failed[0].reason)}`);
+        throw new Error(`${failed.length} of ${n} render tasks failed: ${describe(failed[0].reason)}`);
       }
       return { tiles: tiles.length };
     }),

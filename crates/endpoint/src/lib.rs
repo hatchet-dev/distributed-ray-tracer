@@ -1,14 +1,17 @@
 //! The Hatchet serverless endpoint, independent of where it runs.
 //!
 //! Serves two tasks:
-//! - `render-tile`: given render settings, a camera, a shape script and a rectangle of pixels,
-//!   rebuild the scene and path-trace that tile.
+//! - `render-tiles`: given render settings, a camera, a shape script and a list of tiles
+//!   (rectangles of pixels), build the scene once and path-trace the tiles, returning them all
+//!   as the task's output. A render is a few of these tasks (about one per core), each with
+//!   tiles spread over the image, so Hatchet hands out a few tasks per render, not one per tile.
 //! - `validate-shape`: parse a shape script, so a bad script fails once, before fan-out.
 //!
 //! Scripts can be megabytes, too big to copy into every task's input, so tasks carry a script's
 //! id (the SHA-256 of its text, in hex) and the adapter supplies a [`Scripts`] store to load it
 //! from: the durable stream topic the app published it to (see [`scripts`]). Adapters (the
-//! Cloudflare Worker in `crates/worker`) only move bytes in and out of [`handle`].
+//! native server in `crates/server`, the Cloudflare Worker in `crates/worker`) only move bytes
+//! in and out of [`handle`].
 
 pub mod hatchet;
 pub mod scripts;
@@ -21,8 +24,10 @@ use serde_json::{json, Value};
 
 pub const HEALTHCHECK_PATH: &str = "/hatchet/healthcheck";
 pub const TRIGGER_PATH: &str = "/hatchet/trigger";
-const RENDER: &str = "render-tile";
-const RENDER_ACTION: &str = "render-tile:render-tile";
+const RENDER: &str = "render-tiles";
+const RENDER_ACTION: &str = "render-tiles:render-tiles";
+/// Tiles one task may carry (a whole 7680x4320 image of 64px tiles is 8160).
+const MAX_TILES_PER_TASK: usize = 8192;
 const VALIDATE: &str = "validate-shape";
 const VALIDATE_ACTION: &str = "validate-shape:validate-shape";
 
@@ -31,11 +36,12 @@ pub struct Config<'a> {
     pub endpoint_id: Option<&'a str>,
     /// Shown on the endpoint in the Hatchet dashboard.
     pub runtime_name: &'a str,
-    /// Optional cap on tiles rendering at once across all renders, declared to Hatchet as
-    /// workflow concurrency so the excess waits in Hatchet's queue. `None` = no overall cap.
+    /// Optional cap on render tasks running at once across all renders, declared to Hatchet as
+    /// workflow concurrency so the excess waits in Hatchet's queue. A task renders on one core,
+    /// so about the renderer's total cores. `None` = no overall cap.
     pub max_concurrent_tiles: Option<u32>,
-    /// Optional cap on one render's tiles in flight, so a big render can't take every slot from
-    /// the others. `None` = no per-render cap.
+    /// Optional cap on one render's tasks running at once, so a render can't take every slot
+    /// from the others. `None` = no per-render cap.
     pub max_tiles_per_render: Option<u32>,
     /// Whether this endpoint renders tiles. When another endpoint (e.g. the native server)
     /// renders them, this one declares only `validate-shape`, so Hatchet sends it no tiles.
@@ -43,7 +49,7 @@ pub struct Config<'a> {
 }
 
 /// `serve_render` from the `SERVE_TASKS` setting: a comma-separated list of the tasks to serve
-/// (`render-tile`, `validate-shape`); unset or empty serves both.
+/// (`render-tiles`, `validate-shape`); unset or empty serves both.
 pub fn serves_render(serve_tasks: Option<&str>) -> bool {
     match serve_tasks.map(str::trim).filter(|s| !s.is_empty()) {
         None => true,
@@ -80,11 +86,10 @@ struct ValidateInput {
 }
 
 #[derive(Deserialize)]
-struct TileInput {
+struct TilesInput {
     #[serde(flatten)]
     params: RenderParams,
-    #[serde(flatten)]
-    tile: Tile,
+    tiles: Vec<Tile>,
     #[serde(rename = "scriptId")]
     script_id: String,
 }
@@ -144,37 +149,41 @@ async fn validate(payload: &str, scripts: &impl Scripts) -> Reply {
 }
 
 async fn render(payload: &str, scripts: &impl Scripts) -> Reply {
-    let TileInput { mut params, tile, script_id } = match serde_json::from_str::<ActionPayload<TileInput>>(payload) {
+    let TilesInput { mut params, tiles, script_id } = match serde_json::from_str::<ActionPayload<TilesInput>>(payload) {
         Ok(p) => p.input,
         Err(e) => return error(400, format!("invalid input: {e}"), false),
     };
+    if tiles.is_empty() || tiles.len() > MAX_TILES_PER_TASK {
+        return error(400, format!("a task carries 1 to {MAX_TILES_PER_TASK} tiles"), false);
+    }
+    if let Some(e) = tiles.iter().find_map(|t| params.validate(t).err()) {
+        return error(400, e, false);
+    }
     params.shape = match load(scripts, &script_id).await {
         Ok(s) => s,
         Err(reply) => return reply,
     };
-    if let Err(e) = params.validate(&tile) {
-        return error(400, e, false);
-    }
 
-    let rgb = match scene::render_tile(&params, &tile) {
-        Ok(rgb) => rgb,
-        Err(e) => return error(400, e, false), // bad script: retrying won't help
-    };
-    Reply {
-        status: 200,
-        body: json!({
+    let mut out = Vec::with_capacity(tiles.len());
+    let rendered = scene::render_tiles(&params, &tiles, |tile, rgb| {
+        out.push(json!({
             "x": tile.x, "y": tile.y, "w": tile.w, "h": tile.h,
             // Packed 8-bit sRGB, row-major, w * h * 3 bytes.
             "rgb": base64::engine::general_purpose::STANDARD.encode(rgb),
-        }),
+        }));
+        Ok(())
+    });
+    if let Err(e) = rendered {
+        return error(400, e, false); // bad script: retrying won't help
     }
+    Reply { status: 200, body: json!({ "tiles": out }) }
 }
 
-/// The tiles' concurrency chain; a tile runs once it passes every entry, in order.
-/// 1. Per render (round-robin over renders): one render's tiles in flight, keyed by the
-///    `render_id` the app tags every run with (metadata propagates to children). Tiles of
+/// The render tasks' concurrency chain; a task runs once it passes every entry, in order.
+/// 1. Per render (round-robin over renders): one render's tasks in flight, keyed by the
+///    `render_id` the app tags every run with (metadata propagates to children). Tasks of
 ///    several renders then share the slots instead of the oldest render taking all of them.
-/// 2. Overall: every tile of every render, so the renderer's machines aren't oversubscribed.
+/// 2. Overall: every task of every render, so the renderer's machines aren't oversubscribed.
 fn tile_concurrency(cfg: &Config) -> Option<Value> {
     let rr = "GROUP_ROUND_ROBIN";
     let mut chain = vec![];
@@ -191,7 +200,7 @@ fn tile_concurrency(cfg: &Config) -> Option<Value> {
 fn healthcheck(cfg: &Config) -> Value {
     let mut render = json!({
         "name": RENDER,
-        "description": "Path-trace one tile of a user-scripted scene",
+        "description": "Path-trace tiles of a user-scripted scene",
         // 5xx responses (including Cloudflare's own, e.g. CPU-limit kills under load) are
         // retried with exponential backoff: 2s, 4s, 8s, 16s, then every 30s, so retries
         // don't land in the same burst that caused the failure. 4xx are not retried.

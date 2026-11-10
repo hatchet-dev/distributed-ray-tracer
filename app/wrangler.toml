@@ -15,12 +15,9 @@ directory = "public"
 command = "../scripts/build-preview.sh"
 watch_dir = "../crates"
 
-# Tile size (app/src/workflows.ts tileSize). Tiles render on the native tile server (Porter),
-# where a 64px tile of a light scene takes ~0.1 s and Hatchet's per-tile handoff dominates:
-# allow 128px tiles (a 720p frame is then 60 tiles instead of 240). TILE_WORK (default
-# 10000000) still shrinks tiles for high sample counts.
-[vars]
-TILE_MAX_SIZE = "128"
+# Tiles are spread over a few render tasks (RENDER_TASKS, default 16: about the tile
+# server's cores), so tile size (TILE_MAX_SIZE, default 64) no longer sets how many tasks
+# Hatchet hands out; smaller tiles balance the tasks better.
 
 [limits]
 # Fan-out mostly waits on children (no CPU), but leave headroom for large renders.

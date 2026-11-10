@@ -2,7 +2,8 @@
 
 Distributed path tracing on [Hatchet](https://hatchet.run) serverless endpoints. You describe a
 shape in a chat; a language model writes it as a [Fidget](https://github.com/mkeeter/fidget) (Rhai)
-script, and a `render-scene` workflow fans the image out as one `render-tile` task per tile. Hatchet's
+script, and a `render-scene` workflow fans the image out as a few `render-tiles` tasks (about one per
+core), each rendering tiles spread over the image. Hatchet's
 serverless operator delivers each tile to a **Rust endpoint** on Cloudflare Workers, and finished
 tiles stream back to the browser as they complete.
 
@@ -13,7 +14,7 @@ tiles stream back to the browser as they complete.
     │                              │                                  render-scene: fan out tiles ─────┐
     └──── SSE ◄── streams.subscribe(render-<id>) ◄── publish each tile                                 │
                                                                                                        ▼
-                                                     tile Worker (Rust → wasm): render-tile, validate-shape
+                                                     tile server (Rust): render-tiles, validate-shape
 ```
 
 Keep chatting to refine the shape ("make it gold", "add a second tower", "view it from above"): each
@@ -45,7 +46,7 @@ place it this way.
 | Path | What |
 | --- | --- |
 | `crates/scene` | The scene (`build_scene`), the orbit camera (`CameraParams`), and `render_tile`. Built on [rpt](https://crates.io/crates/rpt) (path tracing, materials, lights) and [Fidget](https://crates.io/crates/fidget) (parses and evaluates shape scripts). `implicit.rs` ray-marches a Fidget shape as an rpt `Shape`; `volume.rs` renders fire and smoke. |
-| `crates/endpoint` | Hatchet's [serverless HTTP contract](https://docs.hatchet.run/v1/serverless/http) in Rust, independent of any runtime: signature checks, the healthcheck that declares `render-tile` and `validate-shape`, and the trigger route. |
+| `crates/endpoint` | Hatchet's [serverless HTTP contract](https://docs.hatchet.run/v1/serverless/http) in Rust, independent of any runtime: signature checks, the healthcheck that declares `render-tiles` and `validate-shape`, and the trigger route. |
 | `crates/worker` | The tile Worker: a Cloudflare adapter for `crates/endpoint` (`workers-rs`, compiled to wasm). |
 | `crates/preview` | The page's preview, compiled to wasm for the browser: meshes each part (`mesh.rs`) and finds where each part's `at` is written (`handles.rs`). `scripts/build-preview.sh` builds it into `app/public/preview/`; `wrangler dev` and `wrangler deploy` in `app/` run it. |
 | `crates/server` | The same tile endpoint as a native HTTP server (axum), for a container: `deploy/tile.Dockerfile`. |

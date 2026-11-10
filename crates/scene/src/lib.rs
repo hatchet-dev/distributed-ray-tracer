@@ -21,7 +21,7 @@ mod volume;
 
 use rpt::*;
 use serde::{Deserialize, Serialize};
-pub use tracer::render_tile;
+pub use tracer::{render_tile, render_tiles};
 
 /// Longest accepted shape script, in bytes.
 /// Fits in one Hatchet durable stream message (just under 4 MiB), where scripts are stored.

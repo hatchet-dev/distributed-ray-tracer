@@ -48,9 +48,29 @@ pub fn render_tile(params: &RenderParams, tile: &Tile) -> Result<Vec<u8>, String
     render_tile_counted(params, tile).map(|(rgb, _)| rgb)
 }
 
+/// Render several tiles of one image, building the scene once, and hand each to `each` as soon
+/// as it's done (in order). Stops at the first error, from the script or from `each`.
+pub fn render_tiles(
+    params: &RenderParams,
+    tiles: &[Tile],
+    mut each: impl FnMut(&Tile, Vec<u8>) -> Result<(), String>,
+) -> Result<(), String> {
+    let built = crate::build_scene(params)?;
+    for tile in tiles {
+        let (rgb, _) = render_built(&built, params, tile);
+        each(tile, rgb)?;
+    }
+    Ok(())
+}
+
 /// [`render_tile`], plus the number of paths it traced.
 pub(crate) fn render_tile_counted(params: &RenderParams, tile: &Tile) -> Result<(Vec<u8>, u64), String> {
     let built = crate::build_scene(params)?;
+    Ok(render_built(&built, params, tile))
+}
+
+/// One tile of an already built scene: packed sRGB bytes and the number of paths traced.
+fn render_built(built: &crate::Built, params: &RenderParams, tile: &Tile) -> (Vec<u8>, u64) {
     let camera = params.camera.camera();
     let tracer = Tracer {
         scene: &built.scene,
@@ -91,7 +111,7 @@ pub(crate) fn render_tile_counted(params: &RenderParams, tile: &Tile) -> Result<
             out.extend(color_bytes(&pixel.mean()));
         }
     }
-    Ok((out, traced))
+    (out, traced)
 }
 
 /// One pixel's running sums, per channel, for its mean and variance.
