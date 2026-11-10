@@ -22,6 +22,24 @@ and the model returns the full updated script. A script's last expression is the
 a list of parts with materials, or a map that also places lights, sky, fire and smoke volumes, and
 the camera. The render options (resolution, maximum samples per pixel, bounces) live in their own panel.
 
+**Preview.** Next to the rendered image (switch with the Preview / Render buttons or P), the page
+shows a live 3D preview of the script: each part meshed in the browser by Fidget's mesher
+(`crates/preview`, compiled to wasm) and drawn with three.js. It
+updates as you edit the script. Drag the background to orbit the view, shift-drag to pan, scroll to
+zoom; arrow keys walk the view around (shift+arrows turn and tilt it). The render camera is an object in the scene, drawn with its frustum: click it to move it (W)
+or turn it (E; left/right and up/down, since the renderer's camera is always level), and the next
+render is taken from there. Once placed by hand, renders keep the camera where it is instead of
+re-framing it on the shape (a new chat frames afresh). "Look through camera" (C) shows exactly what
+the render will frame; then dragging and scrolling orbit and zoom the render camera itself.
+
+Parts with a `label` and an `at: [x, y, z]` can be moved and turned: click one (or its label), then
+drag its arrows (W) or its rings (E, about x, y and z). On release the preview rewrites that part's
+`at` or `rotate: [rx, ry, rz]` (degrees, about x, then y, then z) in the script, or adds a `rotate`
+after its `at`. The text is found in the script's syntax tree, not by the model, so it stays right
+after hand edits. Parts whose `at` is the same variable (`let lamp_at = [...]`) move and turn
+together; computed positions show, but can't be moved. The model is asked to label every part and
+place it this way.
+
 ## Layout
 
 | Path | What |
@@ -29,7 +47,8 @@ the camera. The render options (resolution, maximum samples per pixel, bounces) 
 | `crates/scene` | The scene (`build_scene`), the orbit camera (`CameraParams`), and `render_tile`. Built on [rpt](https://crates.io/crates/rpt) (path tracing, materials, lights) and [Fidget](https://crates.io/crates/fidget) (parses and evaluates shape scripts). `implicit.rs` ray-marches a Fidget shape as an rpt `Shape`; `volume.rs` renders fire and smoke. |
 | `crates/endpoint` | Hatchet's [serverless HTTP contract](https://docs.hatchet.run/v1/serverless/http) in Rust, independent of any runtime: signature checks, the healthcheck that declares `render-tile` and `validate-shape`, and the trigger route. |
 | `crates/worker` | The tile Worker: a Cloudflare adapter for `crates/endpoint` (`workers-rs`, compiled to wasm). |
-| `app` | One Cloudflare Worker (TypeScript) for everything else: the page (`public/`), the render API (`src/index.ts`), and the workflows `describe-and-render` and `render-scene` (`src/workflows.ts`) served under `/hatchet` with [`@hatchet-dev/serverless`](https://www.npmjs.com/package/@hatchet-dev/serverless). `src/describe.ts` is the model call. |
+| `crates/preview` | The page's preview, compiled to wasm for the browser: meshes each part (`mesh.rs`) and finds where each part's `at` is written (`handles.rs`). `scripts/build-preview.sh` builds it into `app/public/preview/`; `wrangler dev` and `wrangler deploy` in `app/` run it. |
+| `app` | One Cloudflare Worker (TypeScript) for everything else: the page (`public/`, with the preview in `preview-view.js` and `preview-worker.js`), the render API (`src/index.ts`), and the workflows `describe-and-render` and `render-scene` (`src/workflows.ts`) served under `/hatchet` with [`@hatchet-dev/serverless`](https://www.npmjs.com/package/@hatchet-dev/serverless). `src/describe.ts` is the model call. |
 
 ## Deploy
 
@@ -134,8 +153,8 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
 - **Framing.** `validate-shape` also returns the shape's visible bounding box, computed with Fidget's
   interval arithmetic (it proves regions empty), in ~2 ms. When the shape is new, `render-scene`
   aims the camera at the box's center and pulls back until all 8 corners fit both fields of view,
-  keeping the user's orbit angles. Orbit and zoom renders don't reframe, and neither does a chat
-  refinement unless it changed the camera the script sets.
+  keeping the user's orbit angles. Renders after placing the camera in the preview don't reframe,
+  and neither does a chat refinement unless it changed the camera the script sets.
 - **Durable streams.** Each render publishes to one Hatchet durable stream topic (`render-<id>`):
   `status`, `script-delta`, `script`, `camera`, `render`, `tile`, then `done` or `error`. The app
   Worker relays the topic to the browser as Server-Sent Events. Durable streams are alpha and
@@ -161,7 +180,9 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   is retried up to 8 times with exponential backoff (2 s, 4 s, 8 s, 16 s, then every 30 s); 4xx
   errors such as a bad script are not retried. A tile gives up reading its script after 20 s, so a
   stalled connection turns into a quick retry instead of a stuck render.
-- **Cancellation.** Moving the camera, starting another render or pressing Stop cancels the run and
+- **Cancellation.** Starting another render or pressing Stop cancels the run and its tiles. The
+  chat's Stop button covers writing the script; once a chat turn's script is final, its render
+  belongs to the Render panel, whose button becomes Stop. Cancelling stops the run and
   its tiles (`POST /api/render/<id>/cancel`). The app Worker cancels by a `render_id` metadata tag,
   which propagates to child runs. The parent also cancels any tiles it spawned after the
   cancellation arrived. Closing the tab does not cancel: see Resuming.

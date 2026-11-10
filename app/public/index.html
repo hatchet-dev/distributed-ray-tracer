@@ -16,8 +16,36 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: var(--text); }
   [hidden] { display: none !important; }
 
-  /* The render is the page background. */
+  /* The render is the page background; the preview takes its place while previewing. */
   #c { position: fixed; inset: 0; width: 100vw; height: 100vh; object-fit: cover; display: block; z-index: 0; }
+  #preview, #preview-labels, #preview-note { display: none; }
+  body.previewing #c { display: none; }
+  body.previewing #preview { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0;
+                             touch-action: none; }
+  body.previewing #preview-labels { display: block; position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+  .part-label { position: absolute; left: 0; top: 0; pointer-events: auto; padding: 2px 7px; font-size: 11px;
+                font-weight: 600; border-radius: 6px; background: rgba(12, 13, 17, 0.72); color: var(--text);
+                border: 1px solid var(--glass-line); white-space: nowrap; }
+  .part-label:hover { border-color: var(--accent); }
+  .part-label.selected { background: #ffd36b; color: #1b1606; border-color: #ffd36b; }
+  .part-label.fixed { color: var(--muted); font-weight: 500; cursor: default; }
+  body.previewing #preview-note { display: block; position: fixed; z-index: 1; top: 60px; left: 50%;
+                  transform: translateX(-50%); max-width: min(560px, calc(100vw - 32px)); font-size: 12px;
+                  color: var(--muted); text-align: center; text-shadow: 0 1px 3px #000; pointer-events: none; }
+  #preview-note.err { color: var(--err); }
+  body.hide-ui #preview-note, body.hide-ui #preview-labels { opacity: 0; }
+  #preview-tools { display: none; }
+  body.previewing #preview-tools { display: flex; position: fixed; z-index: 1; top: 88px; left: 50%;
+                  transform: translateX(-50%); padding: 3px; gap: 2px; border-radius: 10px; }
+  #preview-tools button { background: transparent; color: var(--muted); font-weight: 500; padding: 5px 11px; font-size: 12px; }
+  #preview-tools button[aria-pressed=true] { background: var(--field); color: var(--text); }
+  .part-label.camera { border-color: var(--accent); color: var(--accent); }
+  .part-label.camera.selected { background: var(--accent); color: #0b1020; }
+  #view-switch { position: fixed; z-index: 1; top: 16px; left: 50%; transform: translateX(-50%); display: flex;
+                 padding: 3px; gap: 2px; border-radius: 10px; }
+  #view-switch button { background: transparent; color: var(--muted); font-weight: 500; padding: 6px 14px; }
+  #view-switch button[aria-pressed=true] { background: var(--field); color: var(--text); }
+  body.hide-ui #view-switch { transform: translate(-50%, 4px); }
 
   .panel { position: fixed; z-index: 1; background: var(--glass); border: 1px solid var(--glass-line);
            border-radius: 14px; padding: 14px; backdrop-filter: blur(14px) saturate(140%);
@@ -96,13 +124,6 @@
   #status.ok { color: var(--ok); } #status.err { color: var(--err); }
   #run { font-size: 11px; word-break: break-all; }
 
-  #camera-panel { bottom: 20px; left: 50%; transform: translateX(-50%); padding: 10px; }
-  body.hide-ui #camera-panel { transform: translate(-50%, 4px); }
-  .pad { display: grid; grid-template-columns: repeat(3, 32px); grid-template-rows: repeat(3, 32px); gap: 4px; }
-  .pad button { padding: 0; width: 32px; height: 32px; font-size: 14px; background: var(--field);
-                color: var(--text); border: 1px solid var(--glass-line); font-weight: 500; }
-  .pad button:hover { border-color: var(--accent); }
-
   /* Always visible, so the UI can be brought back. */
   #toggle-ui { position: fixed; z-index: 3; right: 16px; bottom: 16px; background: var(--glass); color: var(--text);
                border: 1px solid var(--glass-line); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
@@ -118,13 +139,28 @@
   @media (max-width: 900px) {
     #render-panel { top: 8px; right: 8px; left: 8px; width: auto; max-width: none; padding: 10px; gap: 8px; }
     #chat { top: auto; left: 8px; right: 8px; bottom: 60px; width: auto; max-width: none; height: 55vh; }
-    #camera-panel { display: none; }
     #shape { height: 120px; }
+    #view-switch { top: auto; bottom: 14px; left: 8px; transform: none; }
+    body.hide-ui #view-switch { transform: translateY(4px); }
+    body.previewing #preview-note { top: auto; bottom: calc(55vh + 70px); }
+    body.previewing #preview-tools { top: auto; bottom: 14px; left: auto; right: 112px; transform: none; }
   }
 </style>
 </head>
 <body>
 <canvas id="c" width="1280" height="720"></canvas>
+<canvas id="preview"></canvas>
+<div id="preview-labels"></div>
+<div id="preview-note"></div>
+<div class="panel" id="preview-tools" role="toolbar" aria-label="Preview tools">
+  <button type="button" data-tool="look" title="See exactly what the render will frame (C)">Look through camera</button>
+  <button type="button" data-tool="translate" title="Move the camera (W); click the camera first">Move</button>
+  <button type="button" data-tool="rotate" title="Turn the camera (E); click the camera first">Turn</button>
+</div>
+<div class="panel" id="view-switch" role="group" aria-label="View" hidden>
+  <button type="button" data-view="preview" title="Live preview: move labelled parts (P)">Preview</button>
+  <button type="button" data-view="render" title="The rendered image (P)">Render</button>
+</div>
 
 <section class="panel" id="chat" aria-label="Shape chat">
   <div class="chat-head">
@@ -212,16 +248,6 @@
   </div>
 </section>
 
-<!-- Shown once there is a shape to orbit. -->
-<section class="panel" id="camera-panel" aria-label="Orbit camera" hidden>
-  <div class="pad">
-    <span></span><button type="button" data-cam="orbit-up" aria-label="Orbit up">↑</button><span></span>
-    <button type="button" data-cam="orbit-left" aria-label="Orbit left">←</button><span></span>
-    <button type="button" data-cam="orbit-right" aria-label="Orbit right">→</button>
-    <span></span><button type="button" data-cam="orbit-down" aria-label="Orbit down">↓</button><span></span>
-  </div>
-</section>
-
 <button id="toggle-ui" type="button" title="Hide or show the controls (H)">Hide UI</button>
 <div class="bar"><div id="progress"></div></div>
 <script>
@@ -243,10 +269,9 @@ $('download').addEventListener('click', () => {
 let request = null, timer = null; // request: the running render's AbortController (starting another aborts it)
 let running = null; // 'chat' (writing a script, then rendering it) | 'render' | null
 
-// Orbit camera (arrows orbit, +/- keys zoom); mirrors CameraParams in crates/scene/src/lib.rs (degrees, Z-up world).
+// The render camera, placed in the preview (preview-view.js); mirrors CameraParams in crates/scene/src/lib.rs (degrees, Z-up world).
 const DEFAULT_CAMERA = { target: [0, 0, 1.2], azimuth: -60, elevation: 18, distance: 9, fov: 39.6, aperture: 0 };
 const camera = structuredClone(DEFAULT_CAMERA);
-const ORBIT_STEP = 45, TILT_STEP = 20, ZOOM_FACTOR = 1.2; // degrees per arrow press
 
 /*
  * The chat: the requests so far, and the script the model last wrote (to tell hand edits apart).
@@ -254,9 +279,10 @@ const ORBIT_STEP = 45, TILT_STEP = 20, ZOOM_FACTOR = 1.2; // degrees per arrow p
  */
 let chat = { history: [], generated: '', log: [] };
 let lastRendered = ''; // the script last sent to render, to decide whether to re-frame the camera
+let cameraPlaced = false; // the camera was placed by hand in the preview: renders keep it there
 const STORE = 'ray-tracer-chat';
 function save() {
-  try { localStorage.setItem(STORE, JSON.stringify({ ...chat, script: $('shape').value, camera })); } catch {}
+  try { localStorage.setItem(STORE, JSON.stringify({ ...chat, script: $('shape').value, camera, cameraPlaced })); } catch {}
 }
 function load() {
   let saved = null;
@@ -265,22 +291,51 @@ function load() {
   chat = { history: saved.history, generated: saved.generated || '', log: saved.log || [] };
   $('shape').value = saved.script || '';
   if (saved.camera) Object.assign(camera, saved.camera);
+  cameraPlaced = !!saved.cameraPlaced;
   chat.log.forEach((m) => addMessage(m.role, m.text, m.cls, false, m.images));
 }
 
 const script = () => $('shape').value;
 const hasScript = () => script().trim() !== '';
 
-/** Shows what depends on there being a script: the editor, the render button, the camera pad. */
+/*
+ * Two views of the scene: the live preview (preview-view.js: the parts as meshes, movable) and
+ * the rendered image. Editing the script shows the preview; starting a render shows the render.
+ */
+let view = 'render';
+function showView(v) {
+  view = v;
+  document.body.classList.toggle('previewing', v === 'preview');
+  document.querySelectorAll('[data-view]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === v)));
+  document.dispatchEvent(new CustomEvent('view-changed', { detail: v }));
+}
+const scriptChanged = () => document.dispatchEvent(new Event('script-changed'));
+// What the preview reads and changes.
+window.app = {
+  camera,
+  script,
+  resolution: () => { const [width, height] = $('resolution').value.split('x').map(Number); return { width, height }; },
+  /** A part moved in the preview: its new position is already in `text`. */
+  setScript(text) {
+    // Moving parts keeps the shape's framing; only a new shape re-frames the camera.
+    if (script() === lastRendered) lastRendered = text;
+    $('shape').value = text;
+    save(); refresh();
+  },
+  /** The camera was changed in the preview; `placed`: by hand, so renders keep it where it is. */
+  cameraMoved(placed = false) { if (placed) cameraPlaced = true; save(); },
+};
+
+/** Shows what depends on there being a script: the editor, the render button, the view switch. */
 function refresh() {
   const has = hasScript();
   $('script-box').hidden = !has && !running;
-  $('camera-panel').hidden = !has;
+  $('view-switch').hidden = !has;
   $('edited').hidden = !has || script() === chat.generated;
   $('render').disabled = (!has && running !== 'render') || running === 'chat';
   $('prompt').placeholder = has
-    ? 'Ask for a change, e.g. make it gold and light it from the left'
-    : 'Describe a shape, e.g. a chess knight made of smooth blobs';
+    ? 'Ask for a change, e.g. make it gold and light it from the left. Paste or upload an image for reference.'
+    : 'Describe a shape, e.g. a chess knight made of smooth blobs. Paste or upload an image for reference.';
   if (!$('log').children.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
@@ -389,8 +444,11 @@ function newChat() {
   renderAttachments();
   chat = { history: [], generated: '', log: [] };
   $('shape').value = '';
+  scriptChanged();
   $('log').replaceChildren();
   Object.assign(camera, structuredClone(DEFAULT_CAMERA));
+  cameraPlaced = false;
+  document.dispatchEvent(new CustomEvent('camera-changed', { detail: 'framed' }));
   lastRendered = '';
   save();
   refresh();
@@ -432,27 +490,11 @@ async function send() {
   startRender(job, 'chat');
 }
 
-function moveCamera(action) {
-  if (!hasScript() || running === 'chat') return;
-  const c = camera;
-  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-  switch (action) {
-    case 'orbit-left': c.azimuth -= ORBIT_STEP; break;
-    case 'orbit-right': c.azimuth += ORBIT_STEP; break;
-    case 'orbit-up': c.elevation = clamp(c.elevation + TILT_STEP, -10, 85); break;
-    case 'orbit-down': c.elevation = clamp(c.elevation - TILT_STEP, -10, 85); break;
-    case 'zoom-in': c.distance = clamp(c.distance / ZOOM_FACTOR, 1, 60); break;
-    case 'zoom-out': c.distance = clamp(c.distance * ZOOM_FACTOR, 1, 60); break;
-  }
-  c.azimuth = ((c.azimuth + 540) % 360) - 180;
-  save();
-  // Batch rapid clicks into one render, keeping the user's view.
-  clearTimeout(moveCamera.debounce);
-  moveCamera.debounce = setTimeout(() => renderScript(false), 250);
-}
-
-/** Renders the script; the server aims the camera at the shape when `frame` (default: the script changed). */
-function renderScript(frame = script() !== lastRendered) {
+/**
+ * Renders the script; the server aims the camera at the shape when `frame` (default: the script
+ * changed, unless the camera was placed by hand).
+ */
+function renderScript(frame = script() !== lastRendered && !cameraPlaced) {
   if (!hasScript()) return;
   if (running === 'render') { stop(); setStatus('Stopped (run cancelled)'); }
   startRender({ shape: script(), frame }, 'render');
@@ -488,7 +530,9 @@ $('render').onclick = () => {
   if (running === 'render') { stop(); setStatus('Stopped (run cancelled)'); return; }
   renderScript();
 };
-$('shape').addEventListener('input', () => { refresh(); save(); });
+$('shape').addEventListener('input', () => { refresh(); save(); if (view !== 'preview') showView('preview'); scriptChanged(); });
+document.querySelectorAll('[data-view]').forEach((b) => (b.onclick = () => showView(b.dataset.view)));
+$('resolution').addEventListener('input', () => document.dispatchEvent(new Event('camera-changed')));
 $('shape').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!running) renderScript(); }
   if (e.key === 'Tab') { e.preventDefault(); e.target.setRangeText('  ', e.target.selectionStart, e.target.selectionEnd, 'end'); }
@@ -498,14 +542,10 @@ $('toggle-script').onclick = () => {
   $('toggle-script').textContent = collapsed ? 'Show' : 'Hide';
 };
 
-document.querySelectorAll('[data-cam]').forEach((b) => (b.onclick = () => moveCamera(b.dataset.cam)));
-const KEYS = { ArrowLeft: 'orbit-left', ArrowRight: 'orbit-right', ArrowUp: 'orbit-up', ArrowDown: 'orbit-down',
-  '+': 'zoom-in', '=': 'zoom-in', '-': 'zoom-out' };
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key.toLowerCase() === 'h') { toggleUi(); return; }
-  const action = KEYS[e.key.length === 1 ? e.key.toLowerCase() : e.key];
-  if (action) { e.preventDefault(); moveCamera(action); }
+  if (e.key.toLowerCase() === 'p' && hasScript()) showView(view === 'preview' ? 'render' : 'preview');
 });
 
 // Quality: a preset fills resolution, samples and bounces; editing any of them makes it Custom.
@@ -623,6 +663,7 @@ function resumeLast(retry = 0) {
 /** Follows a render's event stream: `connect(signal)` starts (or resumes) it and returns the response. */
 async function follow({ kind, turn, width, height, startedAt, connect, resumed = false, retry = 0 }) {
   stop();
+  showView('render');
   $('download').disabled = true; // until this render's first tile, the canvas holds the dimmed old frame
   if (resumed || canvas.width !== width || canvas.height !== height) {
     canvas.width = width; canvas.height = height;
@@ -654,7 +695,7 @@ async function follow({ kind, turn, width, height, startedAt, connect, resumed =
     reply = addMessage('bot', resumed ? 'Resuming…' : 'Starting…');
     turn.reply = chat.log.length - 1;
     onStop = (why = 'Stopped') => {
-      if (!turn.wrote) { $('shape').value = turn.before; chat.generated = turn.beforeGenerated; reply(why, 'err'); }
+      if (!turn.wrote) { $('shape').value = turn.before; chat.generated = turn.beforeGenerated; reply(why, 'err'); scriptChanged(); }
     };
   }
   const wrote = (final) => {
@@ -690,14 +731,16 @@ async function follow({ kind, turn, width, height, startedAt, connect, resumed =
     $('shape').value += m.text;
     $('shape').scrollTop = $('shape').scrollHeight;
   });
-  on('script', (m) => { if (writing) { $('shape').value = m.script; refresh(); } });
+  on('script', (m) => { if (writing) { $('shape').value = m.script; refresh(); scriptChanged(); } });
   // The server framed the shape: orbit and zoom from there.
-  on('camera', (m) => { Object.assign(camera, m.camera); save(); });
+  on('camera', (m) => { Object.assign(camera, m.camera); cameraPlaced = false; save(); document.dispatchEvent(new CustomEvent('camera-changed', { detail: 'framed' })); });
   on('render', (m) => {
     total = m.tiles;
     $('run').textContent = `${m.tileSize}px tiles · ` + $('run').textContent;
     // Rendering starts once the script parsed: this chat turn's script is final.
-    if (writing && !turn.wrote) { wrote(script()); refresh(); }
+    if (writing && !turn.wrote) wrote(script());
+    // From here it's a render: the Render panel stops it, and the chat is free again.
+    if (running === 'chat') setRunning('render'); else refresh();
   });
   on('tile', (t) => {
     const bin = atob(t.rgb);
@@ -769,7 +812,15 @@ async function readEvents(body, emit) {
 
 load();
 refresh();
+showView(hasScript() && !last ? 'preview' : 'render');
 resumeLast();
 </script>
+<script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  } }
+</script>
+<script type="module" src="preview-view.js"></script>
 </body>
 </html>

@@ -24,6 +24,11 @@
 //! ]
 //! ```
 //!
+//! A part may also have a `label` (its name in the page's preview), `rotate: [rx, ry, rz]`
+//! (degrees, about its own origin: x first, then y, then z, about the world axes) and
+//! `at: [x, y, z]`, which moves it there. Its shader's `p` turns and moves with it. The preview
+//! rewrites `at` and `rotate` when a part is dragged or turned.
+//!
 //! Material maps become rpt materials. Fields (all optional): `color` ("#rrggbb" or [r, g, b]
 //! in 0..1, sRGB), `roughness` (0..1), `metallic` (0..1), `glass` (bool), `ior` (index of
 //! refraction, for glass), `emit` (how bright the part glows).
@@ -59,7 +64,16 @@ pub struct SceneSpec {
 }
 
 pub struct Part {
+    /// The shape where it is in the world: `local` turned by `rotate`, then moved by `at`.
     pub tree: Tree,
+    /// The shape as the script built it, before `rotate` and `at`.
+    pub local: Tree,
+    /// Where the part is placed: its `at` (`[0, 0, 0]` if it has none).
+    pub at: [f64; 3],
+    /// How the part is turned, in degrees: its `rotate` (`[0, 0, 0]` if it has none).
+    pub rotate: [f64; 3],
+    /// A name for the part (e.g. in the preview), from its `label`.
+    pub label: Option<String>,
     /// `None`: use the default (clay) material.
     pub material: Option<Material>,
     /// Sets the material point by point (see `shader.rs`).
@@ -124,7 +138,7 @@ fn floor(v: Dynamic, tracing: &Tracing) -> Result<Option<(Material, Option<Shade
     if v.is_map() {
         let mut map = v.cast::<Map>();
         let shader = match map.remove("shader") {
-            Some(f) => Some(tracing.material(&f, "the floor shader")?),
+            Some(f) => Some(tracing.material(&f, "the floor shader", [Tree::x(), Tree::y(), Tree::z()])?),
             None => None,
         };
         let m = material(map).map_err(|e| format!("floor: {e}"))?;
@@ -317,7 +331,7 @@ fn light(mut map: Map) -> Result<Light, String> {
 /// Interpret a value as a list of parts.
 pub fn from_dynamic(value: Dynamic, tracing: &Tracing) -> Result<Vec<Part>, String> {
     if value.is::<Tree>() {
-        return Ok(vec![Part { tree: value.cast::<Tree>(), material: None, shader: None }]);
+        return Ok(vec![Part::bare(value.cast::<Tree>())]);
     }
     if value.is_map() {
         return Ok(vec![part(value.cast::<Map>(), 0, tracing)?]);
@@ -335,7 +349,7 @@ pub fn from_dynamic(value: Dynamic, tracing: &Tracing) -> Result<Vec<Part>, Stri
             .enumerate()
             .map(|(i, item)| {
                 if item.is::<Tree>() {
-                    Ok(Part { tree: item.cast::<Tree>(), material: None, shader: None })
+                    Ok(Part::bare(item.cast::<Tree>()))
                 } else if item.is_map() {
                     part(item.cast::<Map>(), i, tracing)
                 } else {
@@ -350,24 +364,100 @@ pub fn from_dynamic(value: Dynamic, tracing: &Tracing) -> Result<Vec<Part>, Stri
     ))
 }
 
+impl Part {
+    fn bare(tree: Tree) -> Part {
+        Part { local: tree.clone(), tree, at: [0.0; 3], rotate: [0.0; 3], label: None, material: None, shader: None }
+    }
+}
+
+/// Longest part `label`.
+const MAX_LABEL: usize = 40;
+
 fn part(mut map: Map, i: usize, tracing: &Tracing) -> Result<Part, String> {
     let shape = map.remove("shape").ok_or_else(|| format!("part {i} is missing `shape`"))?;
     if !shape.is::<Tree>() {
         return Err(format!("part {i}: `shape` must be a shape, got {}", shape.type_name()));
     }
+    let local = shape.cast::<Tree>();
+    let label = match map.remove("label") {
+        Some(l) => match l.into_string() {
+            Ok(l) if !l.trim().is_empty() && l.chars().count() <= MAX_LABEL => Some(l),
+            _ => return Err(format!("part {i}: `label` must be a short name (1-{MAX_LABEL} characters)")),
+        },
+        None => None,
+    };
+    let at = match map.remove("at") {
+        Some(v) => {
+            let v = vec3(&v, "at").map_err(|e| format!("part {i}: {e}"))?;
+            [v.x, v.y, v.z]
+        }
+        None => [0.0; 3],
+    };
+    let rotate = match map.remove("rotate") {
+        Some(v) => {
+            let v = vec3(&v, "rotate").map_err(|e| format!("part {i}: {e} (degrees)"))?;
+            [v.x, v.y, v.z]
+        }
+        None => [0.0; 3],
+    };
+    let axes = local_axes(at, rotate);
+    let tree = if at == [0.0; 3] && rotate == [0.0; 3] {
+        local.clone()
+    } else {
+        let [lx, ly, lz] = axes.clone();
+        local.remap_xyz(lx, ly, lz)
+    };
     let material = match map.remove("material") {
         Some(m) if m.is_map() => Some(material(m.cast::<Map>()).map_err(|e| format!("part {i} material: {e}"))?),
         Some(m) => return Err(format!("part {i}: `material` must be a map, got {}", m.type_name())),
         None => None,
     };
     let shader = match map.remove("shader") {
-        Some(f) => Some(tracing.material(&f, &format!("part {i} shader"))?),
+        Some(f) => Some(tracing.material(&f, &format!("part {i} shader"), axes)?),
         None => None,
     };
     if let Some(key) = map.keys().next() {
-        return Err(format!("part {i}: unknown field `{key}` (expected `shape`, `material` and `shader`)"));
+        return Err(format!(
+            "part {i}: unknown field `{key}` (expected `shape`, `label`, `at`, `rotate`, `material` and `shader`)"
+        ));
     }
-    Ok(Part { tree: shape.cast::<Tree>(), material, shader })
+    Ok(Part { tree, local, at, rotate, label, material, shader })
+}
+
+/// The rotation `rotate: [rx, ry, rz]` (degrees) stands for, as a row-major matrix: about x
+/// first, then y, then z, all about the world axes (R = Rz Ry Rx; three.js Euler order "ZYX").
+pub fn rotation([rx, ry, rz]: [f64; 3]) -> [[f64; 3]; 3] {
+    let (sx, cx) = rx.to_radians().sin_cos();
+    let (sy, cy) = ry.to_radians().sin_cos();
+    let (sz, cz) = rz.to_radians().sin_cos();
+    [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ]
+}
+
+/// A point of a part placed by `at` and `rotate`, in world coordinates, from its own.
+pub fn to_world(at: [f64; 3], rotate: [f64; 3], p: [f64; 3]) -> [f64; 3] {
+    let r = rotation(rotate);
+    [0, 1, 2].map(|i| (0..3).map(|j| r[i][j] * p[j]).sum::<f64>() + at[i])
+}
+
+/// The part's own coordinates, as expressions of the world's x, y, z: R^T (p - at).
+fn local_axes(at: [f64; 3], rotate: [f64; 3]) -> [Tree; 3] {
+    let r = rotation(rotate);
+    let d = [Tree::x(), Tree::y(), Tree::z()]
+        .into_iter()
+        .zip(at)
+        .map(|(axis, a)| if a == 0.0 { axis } else { axis - Tree::constant(a as f32) })
+        .collect::<Vec<_>>();
+    if rotate == [0.0; 3] {
+        return [d[0].clone(), d[1].clone(), d[2].clone()];
+    }
+    [0, 1, 2].map(|i| {
+        let term = |j: usize| d[j].clone() * Tree::constant(r[j][i] as f32);
+        term(0) + term(1) + term(2)
+    })
 }
 
 fn number(v: &Dynamic, field: &str) -> Result<f64, String> {

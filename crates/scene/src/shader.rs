@@ -10,7 +10,7 @@
 //! #{ parts: [ #{ shape: sphere([0, 0, 1], 1), shader: marble } ], sky: sunset }
 //! ```
 //!
-//! A part's shader takes `(p, n)`: the hit point and the unit surface normal, each a map with
+//! A part's shader takes `(p, n)`: the hit point (in the part's own coordinates, before its `rotate` and `at`) and the unit surface normal, each a map with
 //! `x`, `y`, `z`. It returns a map with any of `color`, `roughness`, `metallic` and `emit`, which
 //! override the part's `material` there. A sky shader takes `d`, the unit direction a ray escapes
 //! in, and returns a color.
@@ -108,9 +108,12 @@ impl<'a> Tracing<'a> {
         })
     }
 
-    /// Traces a part's shader `f(p, n)`.
-    pub fn material(&self, f: &Dynamic, what: &str) -> Result<ShaderSpec, String> {
-        let p = xyz(Tree::x(), Tree::y(), Tree::z());
+    /// Traces a part's shader `f(p, n)`, with `p` in the part's own coordinates (`local`: as
+    /// expressions of the world's x, y, z), so a pattern turns and moves with its part. `n` is
+    /// the world normal, so "up" stays up.
+    pub fn material(&self, f: &Dynamic, what: &str, local: [Tree; 3]) -> Result<ShaderSpec, String> {
+        let [lx, ly, lz] = local;
+        let p = xyz(lx, ly, lz);
         let [nx, ny, nz] = self.normal.map(Tree::from);
         let out = self.call(f, what, (p, xyz(nx, ny, nz)), "(p, n)")?;
         if !out.is_map() {
@@ -491,7 +494,7 @@ mod tests {
         register(&mut engine);
         let ast = engine.compile(script).map_err(|e| e.to_string())?;
         let f: Dynamic = engine.eval_ast(&ast).map_err(|e| e.to_string())?;
-        Shader::new(&Tracing::new(&engine, &ast).material(&f, "shader")?)
+        Shader::new(&Tracing::new(&engine, &ast).material(&f, "shader", [Tree::x(), Tree::y(), Tree::z()])?)
     }
 
     #[test]

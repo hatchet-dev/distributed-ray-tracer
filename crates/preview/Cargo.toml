@@ -1,0 +1,19 @@
+[package]
+name = "preview"
+version = "0.1.0"
+edition = "2021"
+description = "In-browser preview: meshes a shape script's parts and finds where their positions are written"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+scene = { path = "../scene" }
+fidget = { version = "0.5.1", default-features = false, features = ["rhai", "mesh"] }
+wasm-bindgen = "0.2.130"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = { version = "0.2", features = ["js"] }
+nalgebra = "0.35"
+# `internals` exposes the parsed script's syntax tree, to find where each part's `at` is written.
+rhai = { version = "1.24", features = ["sync", "internals"] }

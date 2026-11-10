@@ -262,10 +262,21 @@ impl ImplicitShape {
 
 /// Bounding box of the visible part of a shape (see [`bounds`]).
 pub(crate) fn bounds_of(shape: &VmShape) -> Option<([f32; 3], [f32; 3])> {
+    bounds_within(shape, ([BOUNDS_MIN[0] as f32, BOUNDS_MIN[1] as f32, 0.0], BOUNDS_MAX.map(|v| v as f32)))
+}
+
+/// Bounding box of a whole shape within the marching bounds, including any part below the
+/// floor (for the preview, where a part may yet be moved up).
+pub fn full_bounds(tree: Tree) -> Option<([f32; 3], [f32; 3])> {
+    let lo = [-BOUNDS_MAX[0], -BOUNDS_MAX[1], -BOUNDS_MAX[2]];
+    bounds_within(&VmShape::from(tree), (lo.map(|v| v as f32), BOUNDS_MAX.map(|v| v as f32)))
+}
+
+/// Bounding box of where `shape` may be `<= 0` inside `root`, to [`BOUNDS_DEPTH`] subdivisions.
+fn bounds_within(shape: &VmShape, root: ([f32; 3], [f32; 3])) -> Option<([f32; 3], [f32; 3])> {
     let tape = shape.interval_tape(Default::default());
     let mut eval = VmShape::new_interval_eval();
     let mut found: Option<([f32; 3], [f32; 3])> = None;
-    let root = ([BOUNDS_MIN[0] as f32, BOUNDS_MIN[1] as f32, 0.0], BOUNDS_MAX.map(|v| v as f32));
     let mut stack = vec![(root, 0u32)];
     while let Some(((lo, hi), depth)) = stack.pop() {
         let iv = |i: usize| Interval::new(lo[i], hi[i]);

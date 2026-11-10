@@ -5,6 +5,7 @@
 
 mod implicit;
 mod parts;
+pub mod preview;
 mod shader;
 mod tracer;
 mod volume;
@@ -485,6 +486,64 @@ mod tests {
         eprintln!("traced {traced} of {full} ({:.0}%), mean error {err:.2} levels", 100.0 * traced as f64 / full as f64);
         assert!(traced < full * 2 / 3, "traced {traced} of {full}");
         assert!(err < 2.5, "mean error {err}");
+    }
+
+    /// `at` places a part (and its shader's `p`), and labels are kept; the prompt's examples
+    /// (app/src/describe.ts) that use them run.
+    #[test]
+    fn parts_are_placed_with_at() {
+        let b = validate_shape(r#"[#{ label: "ball", shape: sphere([0, 0, 0], 1), at: [3, 0, 1] }]"#).unwrap().unwrap();
+        assert!((b.min[0] - 2.0).abs() < 0.4 && (b.max[0] - 4.0).abs() < 0.4, "{b:?}");
+        let spec = implicit::parse_scene(r#"[#{ label: "ball", shape: sphere(), at: [3, 0, 1] }]"#).unwrap();
+        assert_eq!((spec.parts[0].label.as_deref(), spec.parts[0].at), (Some("ball"), [3.0, 0.0, 1.0]));
+        assert!(validate_shape(r#"[#{ shape: sphere(), at: [1, 2] }]"#).unwrap_err().contains("[x, y, z]"));
+        assert!(validate_shape(r#"[#{ shape: sphere(), label: 3 }]"#).unwrap_err().contains("label"));
+
+        // A shader that colors the part's own +x half red moves with it.
+        let script = |at: &str| format!(
+            r##"[#{{ shape: sphere([0, 0, 0], 1), at: {at}, shader: |p, n| #{{ color: select(step(0.0, p.x), "#ff0000", "#0000ff") }} }}]"##
+        );
+        let shaded = |at: &str| {
+            let spec = implicit::parse_scene(&script(at)).unwrap();
+            let shader = shader::Shader::new(spec.parts[0].shader.as_ref().unwrap()).unwrap();
+            let mut m = default_material();
+            shader.shade(&mut m, &glm::vec3(2.5, 0.0, 1.0), &glm::vec3(1.0, 0.0, 0.0));
+            m.color
+        };
+        assert!(shaded("[0, 0, 1]").x > 0.9, "x = 2.5 is on the +x side of a ball at the origin");
+        assert!(shaded("[3, 0, 1]").z > 0.9, "x = 2.5 is on the -x side of a ball at x = 3");
+
+        // `rotate` turns a part about its own origin, x first, then y, then z: a long thin box along
+        // x, turned 90 degrees about z, lies along y.
+        let b = validate_shape(r#"[#{ shape: box(#{ lower: [-2, -0.2, -0.2], upper: [2, 0.2, 0.2] }), rotate: [0, 0, 90], at: [0, 0, 1] }]"#).unwrap().unwrap();
+        assert!(b.max[1] - b.min[1] > 3.5 && b.max[0] - b.min[0] < 1.0, "{b:?}");
+        // The shape's surface lands where `to_world` puts it, for a turn about all three axes.
+        let spec = implicit::parse_scene(r#"[#{ shape: box(#{ lower: [0, 0, 0], upper: [1, 2, 3] }), rotate: [30, -50, 70], at: [1, 2, 3] }]"#).unwrap();
+        let part = &spec.parts[0];
+        for corner in [[1.0, 2.0, 3.0], [1.0, 0.0, 0.0], [0.0, 2.0, 3.0]] {
+            let w = parts::to_world(part.at, part.rotate, corner);
+            let mut eval = fidget::vm::VmShape::new_point_eval();
+            let shape = fidget::vm::VmShape::from(part.tree.clone());
+            let tape = shape.point_tape(Default::default());
+            let (v, _) = eval.eval(&tape, w[0] as f32, w[1] as f32, w[2] as f32).unwrap();
+            assert!(v.abs() < 1e-4, "corner {corner:?} at {w:?}: {v}");
+        }
+
+        for example in [
+            r##"let tower = extrude_z(circle([0, 0], 0.55), #{ lower: 0.4, upper: 3.4 });
+                let stripe = intersection(tower.scale_uniform(1.02), box(#{ lower: [-1, -1, 1.6], upper: [1, 1, 2.1] }));
+                let tower_at = [0.0, 0.0, 0.0];
+                [ #{ label: "tower", shape: tower, at: tower_at, material: #{ color: "#ece6d8", roughness: 0.5 } },
+                  #{ label: "stripe", shape: stripe, at: tower_at, material: #{ color: "#b3261e", roughness: 0.4 } } ]"##,
+            r##"let post = extrude_z(circle([0, 0], 0.08), #{ lower: 0, upper: 2.2 });
+                let glow = sphere([0, 0, 2.45], 0.2);
+                let lantern_at = [0.0, 0.0, 0.0];
+                #{ parts: [ #{ label: "post", shape: post, at: lantern_at }, #{ label: "glow", shape: glow, at: lantern_at } ],
+                   lights: [ #{ point: [lantern_at[0] + 0.3, lantern_at[1] - 0.3, 2.45], color: "#ffcf87", intensity: 20 } ] }"##,
+            r#"let lamp_at = [2, 0, 0]; #{ parts: sphere(), lights: [#{ point: [lamp_at[0], lamp_at[1], lamp_at[2] + 2.4] }] }"#,
+        ] {
+            validate_scene(example).unwrap();
+        }
     }
 
     #[test]

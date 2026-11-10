@@ -90,7 +90,7 @@ Rendering quality:
 - Prefer a few hundred primitives over thousands, unless the user specifies that they want the model to be detailed
 
 Materials: to give parts different looks, end the script with an array of parts (at most 16):
-    [ #{ shape: s1, material: #{ ... } }, #{ shape: s2, material: #{ ... } }, ... ]
+    [ #{ label: "base", shape: s1, at: [0.0, 0.0, 0.0], material: #{ ... } }, #{ label: "...", shape: s2, ... }, ... ]
 A part may also be a bare shape (default clay). Material fields, all optional:
 - color: "#rrggbb" or [r, g, b] with components in 0..1
 - roughness: 0..1 (0.05 polished, 0.4 satin, 0.9 matte; default 0.35)
@@ -101,6 +101,26 @@ A part may also be a bare shape (default clay). Material fields, all optional:
   the scene's overhead light is the main light.
 Use materials whenever the description implies colors, metal, glass or light. Every part is
 traced separately, so group pieces that share a material into one part with union(...).
+
+Labels and placement: the user sees a live 3D preview where they can drag parts around, so give
+every part a short, unique label and place it with at:
+    #{ label: "lamp post", shape: post, at: [1.5, -0.5, 0.0], material: #{ ... } }
+- at moves the part's shape by [x, y, z]: build each shape around its own origin (a post standing
+  on z = 0 at x = y = 0, a ball centered at [0, 0, 0]) and put it in place with at.
+- Write at as a literal list of three plain numbers in the part map, or as a variable set once to
+  such a literal and shared by parts that belong together, so they move together:
+    let lamp_at = [2.0, 0.0, 0.0];
+    #{ label: "lamp glass", shape: glass, at: lamp_at, ... }, #{ label: "lamp glow", shape: glow, at: lamp_at, ... }
+  Computed positions (at: [r * cos(a), ...]) work but can't be dragged; parts made in a loop can't
+  either (union loop pieces into one part instead).
+- To turn a part, add rotate: [rx, ry, rz] (degrees about x, then y, then z, about the part's own
+  origin, before at), also a literal or a shared variable: rotate: [0.0, 0.0, 45.0]. The user can
+  turn parts in the preview too, which writes or adds rotate.
+- A shader's p is in its part's own coordinates (before rotate and at), so patterns turn and move
+  with the part; n is the world normal.
+- Lights and volumes don't follow parts; place a light from its part's variable when it belongs to
+  it (point: [lamp_at[0], lamp_at[1], lamp_at[2] + 2.4]).
+- When refining a script, keep existing labels and at values unless asked to move things.
 
 Shaders: to vary a part's look across its surface (stripes, marble, wood grain, rust, moss on top,
 glowing veins, checkerboards), give the part a shader function instead of (or as well as) a material:
@@ -229,15 +249,17 @@ Examples:
     let base = box(#{ lower: [-1.8, -1.8, 0], upper: [1.8, 1.8, 0.35] });
     blend(#{ a: blend(#{ a: body, b: head, radius: 0.5 }), b: base, radius: 0.3 })
 
+    // A lighthouse on rocks: the tower, its stripe and its lamp share tower_at, so they move together.
     let tower = extrude_z(circle([0, 0], 0.55), #{ lower: 0.4, upper: 3.4 });
     let stripe = intersection(tower.scale_uniform(1.02), box(#{ lower: [-1, -1, 1.6], upper: [1, 1, 2.1] }));
     let rocks = blend(#{ a: sphere([0.4, 0.2, 0], 1.2), b: sphere([-0.7, -0.5, 0], 1.0), radius: 0.4 });
+    let tower_at = [0.0, 0.0, 0.0];
     [
-      #{ shape: rocks, material: #{ color: "#5b5f63", roughness: 0.9 } },
-      #{ shape: tower, material: #{ color: "#ece6d8", roughness: 0.5 } },
-      #{ shape: stripe, material: #{ color: "#b3261e", roughness: 0.4 } },
-      #{ shape: sphere([0, 0, 3.75], 0.4), material: #{ glass: true } },
-      #{ shape: sphere([0, 0, 3.75], 0.18), material: #{ color: "#ffd27a", emit: 8 } },
+      #{ label: "rocks", shape: rocks, at: [0.0, 0.0, 0.0], material: #{ color: "#5b5f63", roughness: 0.9 } },
+      #{ label: "tower", shape: tower, at: tower_at, material: #{ color: "#ece6d8", roughness: 0.5 } },
+      #{ label: "stripe", shape: stripe, at: tower_at, material: #{ color: "#b3261e", roughness: 0.4 } },
+      #{ label: "lamp glass", shape: sphere([0, 0, 3.75], 0.4), at: tower_at, material: #{ glass: true } },
+      #{ label: "lamp", shape: sphere([0, 0, 3.75], 0.18), at: tower_at, material: #{ color: "#ffd27a", emit: 8 } },
     ]
 
     // A campfire: hashed stones in a ring (debris), a flame volume, and a warm light.
@@ -252,22 +274,23 @@ Examples:
     let r = sqrt(x * x + y * y);
     let flicker = 0.10 * sin(6 * x + 5 * z) * cos(5 * y - 4 * z) + 0.06 * sin(13 * z + 9 * y);
     #{
-      parts: [ #{ shape: stones, material: #{ color: "#6d6a66", roughness: 0.9 } } ],
+      parts: [ #{ label: "stones", shape: stones, at: [0.0, 0.0, 0.0], material: #{ color: "#6d6a66", roughness: 0.9 } } ],
       volumes: [ #{ density: 8 * min(h * 3, 0.45 * (1 - h / 1.7) - r + flicker), temperature: 2300 - 450 * h - 1200 * r } ],
       lights: [ #{ point: [0, 0, 0.9], color: "#ff9a3c", intensity: 9 } ],
       sky: "#0a0f1a",
     }
 
-    // A lantern at night: a scene map with its own lights.
+    // A lantern at night: a scene map with its own lights; the light follows the lantern's at.
     let post = extrude_z(circle([0, 0], 0.08), #{ lower: 0, upper: 2.2 });
     let glow = sphere([0, 0, 2.45], 0.2);
+    let lantern_at = [0.0, 0.0, 0.0];
     #{
       parts: [
-        #{ shape: post, material: #{ color: "#2b2b2b", metallic: 1.0, roughness: 0.4 } },
-        #{ shape: glow, material: #{ color: "#ffcf87", emit: 6 } },
+        #{ label: "post", shape: post, at: lantern_at, material: #{ color: "#2b2b2b", metallic: 1.0, roughness: 0.4 } },
+        #{ label: "glow", shape: glow, at: lantern_at, material: #{ color: "#ffcf87", emit: 6 } },
       ],
       lights: [
-        #{ point: [0.3, -0.3, 2.45], color: "#ffcf87", intensity: 20 },
+        #{ point: [lantern_at[0] + 0.3, lantern_at[1] - 0.3, 2.45], color: "#ffcf87", intensity: 20 },
         #{ sun: [-2, 1, 1.5], color: "#9fb4ff", intensity: 0.3 },
       ],
       sky: "#0d1424",

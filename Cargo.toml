@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/scene", "crates/endpoint", "crates/worker"]
+members = ["crates/scene", "crates/endpoint", "crates/worker", "crates/preview"]
 
 [profile.release]
 codegen-units = 1

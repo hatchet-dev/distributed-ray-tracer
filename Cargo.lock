@@ -62,6 +62,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -464,6 +470,7 @@ checksum = "69298d7641ec13971a5359ab20961a92482eab6201c7a89a1372a4ceac1f6987"
 dependencies = [
  "document-features",
  "fidget-core",
+ "fidget-mesh",
  "fidget-rhai",
  "workspace-hack",
 ]
@@ -485,6 +492,21 @@ dependencies = [
  "serde",
  "strum",
  "thiserror",
+ "workspace-hack",
+]
+
+[[package]]
+name = "fidget-mesh"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d69e5b061d296f0eadec87045a64c208da2209e1f43565684db2c2761bcb1017"
+dependencies = [
+ "arrayvec",
+ "fidget-core",
+ "nalgebra 0.35.0",
+ "ordered-float",
+ "rayon",
+ "static_assertions",
  "workspace-hack",
 ]
 
@@ -1019,6 +1041,7 @@ dependencies = [
  "glam 0.32.1",
  "glam 0.33.12",
  "matrixmultiply 0.3.11",
+ "nalgebra-macros",
  "num-complex 0.4.6",
  "num-rational 0.4.2",
  "num-traits",
@@ -1037,6 +1060,17 @@ dependencies = [
  "nalgebra 0.24.1",
  "num-traits",
  "simba 0.3.1",
+]
+
+[[package]]
+name = "nalgebra-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "973e7178a678cfd059ccec50887658d482ce16b0aa9da3888ddeab5cd5eb4889"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1218,6 +1252,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "preview"
+version = "0.1.0"
+dependencies = [
+ "fidget",
+ "getrandom 0.2.17",
+ "nalgebra 0.35.0",
+ "rhai",
+ "scene",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]
