@@ -1,50 +1,43 @@
-// The app as one Cloudflare Worker:
+// The render API, independent of where it runs (cloudflare.ts and node.ts serve it, along with
+// Hatchet's serverless endpoint for the workflows under /hatchet/* and the page in public/):
 //
-//   /hatchet/*         Hatchet's serverless endpoint for the orchestration workflows (workflows.ts)
+//   POST /api/images   stores a reference image
 //   POST /api/render   starts a render and streams its progress back as Server-Sent Events
 //   GET  /api/render/<id>?run=<runId>   replays a render's stream (the page resumes after a reload)
 //   POST /api/render/<id>/cancel        cancels a render
-//   everything else    the page (static assets, public/)
 
-import { cloudflare, type HatchetEnv } from '@hatchet-dev/serverless/cloudflare';
 import { HatchetCore } from '@hatchet-dev/typescript-sdk/core';
 import { MAX_SCRIPT_BYTES, parseJob, workflowFor, type Job } from './jobs';
 import { imageType, MAX_IMAGE_BYTES, putImage, putScript } from './scripts';
 import { describe, type StreamMessage } from './messages';
-import { workflows } from './workflows';
+import { secret, type Platform } from './env';
 
-interface Env extends HatchetEnv {
-  HATCHET_CLIENT_TOKEN: string;
+/** Answers an API request, or null when the path isn't part of the API. */
+export async function handleApi(req: Request, ctx: Platform): Promise<Response | null> {
+  const url = new URL(req.url);
+  if (req.method === 'POST' && url.pathname === '/api/images') return uploadImage(req);
+  if (req.method === 'POST' && url.pathname === '/api/render') {
+    const raw = await req.text();
+    if (raw.length > 2 * MAX_SCRIPT_BYTES) return new Response('request too large', { status: 413 });
+    let job: Job | string;
+    try {
+      job = parseJob(JSON.parse(raw));
+    } catch (err) {
+      job = `invalid request: ${describe(err)}`;
+    }
+    if (typeof job === 'string') return new Response(job, { status: 400 });
+    return render(job, ctx, req.signal);
+  }
+  // /api/render/<renderId>: resume (GET) or cancel (POST .../cancel) a render.
+  const m = url.pathname.match(/^\/api\/render\/([^/]+)(\/cancel)?$/);
+  if (m && req.method === 'GET' && !m[2]) return resume(m[1], url.searchParams.get('run'), ctx, req.signal);
+  if (m && req.method === 'POST' && m[2]) {
+    if (!UUID.test(m[1])) return new Response('unknown render', { status: 400 });
+    await cancelRender(hatchetFor(), m[1]);
+    return new Response(null, { status: 204 });
+  }
+  return null;
 }
-
-export default cloudflare<Env>({
-  workflows,
-  fetch: async (req, env, ctx) => {
-    const url = new URL(req.url);
-    if (req.method === 'POST' && url.pathname === '/api/images') return uploadImage(req);
-    if (req.method === 'POST' && url.pathname === '/api/render') {
-      const raw = await req.text();
-      if (raw.length > 2 * MAX_SCRIPT_BYTES) return new Response('request too large', { status: 413 });
-      let job: Job | string;
-      try {
-        job = parseJob(JSON.parse(raw));
-      } catch (err) {
-        job = `invalid request: ${describe(err)}`;
-      }
-      if (typeof job === 'string') return new Response(job, { status: 400 });
-      return render(job, env, ctx, req.signal);
-    }
-    // /api/render/<renderId>: resume (GET) or cancel (POST .../cancel) a render.
-    const m = url.pathname.match(/^\/api\/render\/([^/]+)(\/cancel)?$/);
-    if (m && req.method === 'GET' && !m[2]) return resume(m[1], url.searchParams.get('run'), env, ctx, req.signal);
-    if (m && req.method === 'POST' && m[2]) {
-      if (!UUID.test(m[1])) return new Response('unknown render', { status: 400 });
-      await cancelRender(hatchetFor(env), m[1]);
-      return new Response(null, { status: 204 });
-    }
-    return new Response('Not Found', { status: 404 });
-  },
-});
 
 /** POST /api/images: stores a reference image (the raw bytes) and returns `{ id }` for a chat turn's `imageIds`. */
 async function uploadImage(req: Request): Promise<Response> {
@@ -71,7 +64,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** Renders run at most an hour (their execution timeout); cancelling looks back a little further. */
 const RENDER_LOOKBACK_MS = 2 * 60 * 60 * 1000;
 
-const hatchetFor = (env: Env) => new HatchetCore({ token: env.HATCHET_CLIENT_TOKEN });
+const hatchetFor = () => {
+  const token = secret('HATCHET_CLIENT_TOKEN');
+  if (!token) throw new Error('HATCHET_CLIENT_TOKEN is not set');
+  return new HatchetCore({ token });
+};
 
 /** Cancels a render and everything it spawned: they share a `render_id` tag, since run metadata propagates to children. */
 function cancelRender(hatchet: HatchetCore, renderId: string) {
@@ -88,8 +85,8 @@ function cancelRender(hatchet: HatchetCore, renderId: string) {
  * when the browser goes away (the page can come back to it), except before `start` was sent, when
  * nobody could cancel it: then it is cancelled.
  */
-function render(job: Job, env: Env, ctx: ExecutionContext, disconnected: AbortSignal): Response {
-  const hatchet = hatchetFor(env);
+function render(job: Job, ctx: Platform, disconnected: AbortSignal): Response {
+  const hatchet = hatchetFor();
   const renderId = crypto.randomUUID();
   let started = false;
   disconnected.addEventListener('abort', () => {
@@ -107,9 +104,9 @@ function render(job: Job, env: Env, ctx: ExecutionContext, disconnected: AbortSi
 }
 
 /** GET /api/render/<renderId>?run=<runId>: replays a render's stream from its start, then follows it live. */
-async function resume(renderId: string, runId: string | null, env: Env, ctx: ExecutionContext, disconnected: AbortSignal) {
+async function resume(renderId: string, runId: string | null, ctx: Platform, disconnected: AbortSignal) {
   if (!UUID.test(renderId) || !runId || !UUID.test(runId)) return new Response('unknown render', { status: 400 });
-  const hatchet = hatchetFor(env);
+  const hatchet = hatchetFor();
   // Subscribing to an empty topic would wait forever.
   const stored = await hatchet.streams.topicMetadata(`render-${renderId}`).then((m) => m.messageCount > 0, () => false);
   if (!stored) return new Response('this render is no longer stored', { status: 404 });
@@ -129,7 +126,7 @@ type Start = { type: 'start'; renderId: string; runId: string };
 function relay(
   hatchet: HatchetCore,
   renderId: string,
-  ctx: ExecutionContext,
+  ctx: Platform,
   disconnected: AbortSignal,
   begin: (send: (m: Start) => void) => Promise<string>
 ): Response {

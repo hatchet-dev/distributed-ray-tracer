@@ -1,5 +1,5 @@
 // Validation of a render request (POST /api/render).
-import { EFFORTS, MODELS, type Effort, type Model, type RenderSettings } from './messages.js';
+import { DEFAULT_EFFORT, DEFAULT_MODEL, EFFORTS, MODELS, type Effort, type Model, type RenderSettings } from './messages.js';
 import { MAX_IMAGES } from './scripts.js';
 
 /** Bounds checked up front so a bad request doesn't spawn thousands of failing tiles. */
@@ -33,7 +33,7 @@ export function parseJob(body: Record<string, unknown>): Job | string {
 
   if (typeof description === 'string' && description.trim()) {
     if (description.length > MAX_DESCRIPTION_CHARS) return `description must be under ${MAX_DESCRIPTION_CHARS} characters`;
-    const { model = 'claude-opus-5-5', effort = 'medium' } = body;
+    const { model = DEFAULT_MODEL, effort = DEFAULT_EFFORT } = body;
     if (!MODELS.includes(model as Model)) return `model must be one of ${MODELS.join(', ')}`;
     if (!EFFORTS.includes(effort as Effort)) return `effort must be one of ${EFFORTS.join(', ')}`;
     const { script, history = [], imageIds = [] } = body;

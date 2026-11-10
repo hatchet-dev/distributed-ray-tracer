@@ -1,4 +1,4 @@
-// Types shared by the workflows (workflows.ts) and the render API (index.ts).
+// Types shared by the workflows (workflows.ts) and the render API (app.ts).
 
 export type RenderSettings = {
   width: number;
@@ -39,11 +39,15 @@ export type Validation = {
 };
 
 /** Models and effort levels the user can pick for script generation. */
-// Not Fable: too costly for this app. parseJob rejects anything else, and ScriptWriter checks again.
-export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'] as const;
-export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+// OpenAI's GPT-5.6 tiers: Sol (flagship), Terra (balanced), Luna (fastest, cheapest). parseJob
+// rejects anything else, and ScriptWriter checks again.
+export const MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const;
+/** Reasoning effort. */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const;
 export type Model = (typeof MODELS)[number];
 export type Effort = (typeof EFFORTS)[number];
+export const DEFAULT_MODEL: Model = 'gpt-5.6-sol';
+export const DEFAULT_EFFORT: Effort = 'medium';
 
 export type DescribeInput = RenderSettings & {
   description: string;
@@ -55,7 +59,7 @@ export type DescribeInput = RenderSettings & {
   /** Point the camera at the shape (a new chat); refinements keep the viewer's camera. */
   frame?: boolean;
   topic: string;
-  /** Script-generation model and effort; default claude-opus-5-5 at medium. */
+  /** Script-generation model and effort; default DEFAULT_MODEL at DEFAULT_EFFORT. */
   model?: Model;
   effort?: Effort;
 };

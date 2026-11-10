@@ -1,26 +1,20 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { MODELS, type Effort, type Model } from './messages';
+import OpenAI from 'openai';
+import { DEFAULT_EFFORT, DEFAULT_MODEL, MODELS, type Effort, type Model } from './messages';
+import { secret } from './env';
 import type { ImageType } from './scripts';
 
-/**
- * Created on first use: on Cloudflare, secrets reach `process.env` (where the SDK reads
- * ANTHROPIC_API_KEY) with the request, not at module load.
- */
-let anthropic: Anthropic | undefined;
+/** Created on first use: on Cloudflare, secrets are only readable once a request arrives. */
+let openai: OpenAI | undefined;
 
-const DEFAULT_MODEL: Model = 'claude-opus-5-5';
-const DEFAULT_EFFORT: Effort = 'medium';
 /**
- * Web search runs on Anthropic's side (with dynamic filtering): the model decides when to look
- * something up. A few searches at most per request, since each adds cost and result tokens.
+ * Web search runs on OpenAI's side: the model decides when to look something up. A few searches
+ * at most per request, since each adds cost and result tokens.
  */
-const TOOLS = [{ type: 'web_search_20260209' as const, name: 'web_search' as const, max_uses: 3 }];
+const TOOLS: OpenAI.Responses.Tool[] = [{ type: 'web_search', search_context_size: 'low' }];
+const MAX_TOOL_CALLS = 3;
 
 /** Streaming progress: script text (`restart` after a search, dropping text written before it) and searches. */
 export type Progress = { text: (delta: string, restart: boolean) => void; search: () => void };
-
-/** Server-side refusal fallback is unavailable for Haiku 5.5; the others accept `fallbacks: "default"`. */
-const SUPPORTS_FALLBACK = (model: Model) => model !== 'claude-haiku-5-5';
 
 /**
  * Reference for Fidget's Rhai bindings, written against fidget 0.5.1 (fidget-rhai + fidget-shapes)
@@ -304,9 +298,6 @@ attached reference images already show. Write nothing before or between searches
 Reply with only the Rhai script: no explanation and no Markdown code fences. Short comments inside
 the script are welcome.`;
 
-/** Blocks other than the model's own text and thinking: searches, their results, and filtering code. */
-const isToolBlock = (type: string) => !['text', 'thinking', 'redacted_thinking'].includes(type);
-
 /** Strip Markdown fences in case the model adds them anyway. */
 function cleanScript(text: string): string {
   const fenced = text.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
@@ -315,11 +306,11 @@ function cleanScript(text: string): string {
 
 /**
  * A conversation that turns a description into a script (or changes the current script as a
- * description asks), then repairs it from validation errors.
- * The history is append-only (full response content, including thinking blocks, goes back as-is).
+ * description asks), then repairs it from validation errors. OpenAI keeps the conversation
+ * (reasoning included): each turn continues from the previous response by id.
  */
 export class ScriptWriter {
-  private messages: Anthropic.Beta.BetaMessageParam[] = [];
+  private previous: string | undefined;
 
   constructor(
     private request: {
@@ -356,81 +347,71 @@ export class ScriptWriter {
         'and lighting unless the request says otherwise. Model it from the scene conventions (Z up, resting ' +
         'on the floor), whatever the photo\'s viewpoint.';
     }
-    this.messages.push({
-      role: 'user',
-      content: [
-        ...images.map((image) => ({
-          type: 'image' as const,
-          source: { type: 'base64' as const, media_type: image.mediaType, data: image.data },
-        })),
-        { type: 'text' as const, text },
-      ],
-    });
-    return this.complete(progress);
+    return this.complete([
+      ...images.map((image) => ({
+        type: 'input_image' as const,
+        image_url: `data:${image.mediaType};base64,${image.data}`,
+        detail: 'auto' as const,
+      })),
+      { type: 'input_text' as const, text },
+    ], progress);
   }
 
   /** Ask for a corrected script after `error` from Fidget's parser. */
   repair(error: string, progress: Progress) {
-    this.messages.push({
-      role: 'user',
-      content: `That script failed when Fidget evaluated it:\n\n${error}\n\nReply with the corrected full script.`,
-    });
-    return this.complete(progress);
+    const text = `That script failed when Fidget evaluated it:\n\n${error}\n\nReply with the corrected full script.`;
+    return this.complete([{ type: 'input_text', text }], progress);
   }
 
-  private async complete(progress: Progress): Promise<string> {
-    anthropic ??= new Anthropic();
-    let message: Anthropic.Beta.BetaMessage;
+  private async complete(content: OpenAI.Responses.ResponseInputMessageContentList, progress: Progress): Promise<string> {
+    const apiKey = secret('OPENAI_API_KEY');
+    if (!apiKey) throw new Error('OPENAI_API_KEY is not set');
+    openai ??= new OpenAI({ apiKey });
     let restart = false; // the next text follows a search: drop what was streamed before it
-    for (;;) {
-      const stream = anthropic.beta.messages.stream({
-        model: this.model,
-        max_tokens: 128000, // the most any of the selectable models can write
-        thinking: { type: 'adaptive' },
-        output_config: { effort: this.effort },
-        // If a safety classifier declines, let the API retry on its recommended fallback model.
-        ...(SUPPORTS_FALLBACK(this.model)
-          ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
-          : {}),
-        tools: TOOLS,
-        system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-        messages: this.messages,
-      });
-      stream.on('streamEvent', (event) => {
-        if (event.type === 'content_block_start' && isToolBlock(event.content_block.type)) {
-          if (event.content_block.type === 'server_tool_use' && event.content_block.name === 'web_search') progress.search();
-          restart = true;
-        }
-      });
-      stream.on('text', (delta) => {
-        progress.text(delta, restart);
-        restart = false;
-      });
-      message = await stream.finalMessage();
-
-      if (message.stop_reason === 'refusal') {
-        throw new Error(
-          `The model declined to write this shape${message.stop_details?.explanation ? `: ${message.stop_details.explanation}` : ''}`
-        );
+    const stream = openai.responses.stream({
+      model: this.model,
+      reasoning: { effort: this.effort },
+      // Instructions don't carry over from the previous response, so they go with every turn.
+      instructions: SYSTEM,
+      // The instructions are the same for every request: cache them across conversations.
+      prompt_cache_key: 'shape-script-v1',
+      tools: TOOLS,
+      max_tool_calls: MAX_TOOL_CALLS,
+      input: [{ role: 'user', content }],
+      previous_response_id: this.previous,
+    });
+    stream.on('response.output_item.added', (event) => {
+      if (event.item.type === 'web_search_call') {
+        progress.search();
+        restart = true;
       }
-      if (message.stop_reason === 'max_tokens') throw new Error('Shape script generation ran out of output tokens');
+    });
+    stream.on('response.output_text.delta', (event) => {
+      progress.text(event.delta, restart);
+      restart = false;
+    });
+    const response = await stream.finalResponse();
+    this.previous = response.id;
 
-      // A turn that searched may pause; send it back as it is and the API continues it.
-      const last = this.messages[this.messages.length - 1];
-      if (last.role === 'assistant' && Array.isArray(last.content)) last.content.push(...message.content);
-      else this.messages.push({ role: 'assistant', content: [...message.content] });
-      if (message.stop_reason !== 'pause_turn') break;
+    if (response.status === 'incomplete') {
+      const reason = response.incomplete_details?.reason;
+      if (reason === 'max_output_tokens') throw new Error('Shape script generation ran out of output tokens');
+      throw new Error(`Shape script generation stopped early${reason ? ` (${reason})` : ''}`);
     }
+    if (response.error) throw new Error(`Shape script generation failed: ${response.error.message}`);
 
-    // The script is the text after the last search (with citations, it can span several blocks).
-    const content = message.content;
-    let start = content.length;
-    while (start > 0 && !isToolBlock(content[start - 1].type)) start--;
-    const text = content
-      .slice(start)
-      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
+    // The script is the text after the last search.
+    const output = response.output;
+    let start = output.length;
+    while (start > 0 && output[start - 1].type !== 'web_search_call') start--;
+    let text = '';
+    for (const item of output.slice(start)) {
+      if (item.type !== 'message') continue;
+      for (const part of item.content) {
+        if (part.type === 'refusal') throw new Error(`The model declined to write this shape: ${part.refusal}`);
+        text += part.text;
+      }
+    }
     const script = cleanScript(text);
     if (!script) throw new Error('Shape script generation returned an empty script');
     return script;

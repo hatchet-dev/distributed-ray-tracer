@@ -178,11 +178,11 @@
       placeholder="Describe a shape, e.g. a chess knight made of smooth blobs"></textarea>
     <div class="composer-foot">
       <div class="row" style="flex:1">
-        <label title="Which Claude model writes the shape script">Model
+        <label title="Which model writes the shape script">Model
           <select id="model">
-            <option value="claude-opus-5-5" selected>Claude Opus 5.5</option>
-            <option value="claude-sonnet-5-5">Claude Sonnet 5.5</option>
-            <option value="claude-haiku-5-5">Claude Haiku 5.5</option>
+            <option value="gpt-5.6-sol" selected>GPT-5.6 Sol</option>
+            <option value="gpt-5.6-terra">GPT-5.6 Terra</option>
+            <option value="gpt-5.6-luna">GPT-5.6 Luna</option>
           </select>
         </label>
         <label title="How much the model thinks before writing: lower is faster, higher handles harder shapes">Effort
@@ -191,7 +191,6 @@
             <option value="medium" selected>Medium</option>
             <option value="high">High</option>
             <option value="xhigh">Extra high</option>
-            <option value="max">Max</option>
           </select>
         </label>
       </div>
@@ -379,7 +378,7 @@ function diffStat(before, after) {
 }
 
 /*
- * Reference images for the next message. Each is shrunk here to what Claude reads (at most 2576px on
+ * Reference images for the next message. Each is shrunk here to what the model reads (at most 2576px on
  * the long edge, as JPEG) and uploaded as soon as it's attached; the message carries their ids.
  */
 const MAX_IMAGES = 6, MAX_EDGE = 2576, THUMB_EDGE = 128;

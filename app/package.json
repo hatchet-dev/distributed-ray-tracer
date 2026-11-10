@@ -5,17 +5,20 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:node": "esbuild src/node.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server.mjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\"",
+    "start": "node dist/server.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^1.6.0",
     "@hatchet-dev/serverless": "^0.2.0",
     "@hatchet-dev/typescript-sdk": "link:../../hatchet-core-subscribe/sdks/typescript/dist",
+    "openai": "^7.55.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4",
     "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
     "typescript": "^5",
     "wrangler": "^4"
   }

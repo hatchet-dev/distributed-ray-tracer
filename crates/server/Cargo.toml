@@ -1,0 +1,16 @@
+[package]
+name = "ray-tile-server"
+version = "0.1.0"
+edition = "2021"
+description = "Native HTTP server adapter for the render-tile endpoint (for containers, e.g. Azure via Porter)"
+
+[[bin]]
+name = "ray-tile-server"
+path = "src/main.rs"
+
+[dependencies]
+endpoint = { path = "../endpoint" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"] }
+futures-util = { version = "0.3", default-features = false }

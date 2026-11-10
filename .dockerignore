@@ -1,0 +1,13 @@
+# Build context for deploy/*.Dockerfile (built from the repo root).
+target/
+**/node_modules/
+**/.wrangler/
+crates/worker/build/
+.git/
+# Secrets
+**/.env
+**/.env.*
+**/.dev.vars
+**/.dev.vars.*
+**/.signing-secret
+**/.token

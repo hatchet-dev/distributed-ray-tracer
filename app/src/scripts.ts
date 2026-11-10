@@ -4,12 +4,12 @@
 // too (crates/endpoint/src/scripts.rs). Both are capped (MAX_SCRIPT_BYTES, MAX_IMAGE_BYTES) to fit
 // in one stream message.
 
-import { env } from 'cloudflare:workers';
 import { HatchetCore } from '@hatchet-dev/typescript-sdk/core';
+import { secret } from './env';
 
 type Kind = 'script' | 'image';
 const topic = (kind: Kind, id: string) => `${kind}-${id}`;
-const hatchet = () => new HatchetCore({ token: (env as unknown as { HATCHET_CLIENT_TOKEN: string }).HATCHET_CLIENT_TOKEN });
+const hatchet = () => new HatchetCore({ token: secret('HATCHET_CLIENT_TOKEN') ?? '' });
 
 /** Publishes bytes (once per distinct content, while the topic retains them) and returns their id. */
 async function put(kind: Kind, bytes: Uint8Array<ArrayBuffer>): Promise<string> {
@@ -42,13 +42,13 @@ async function get(kind: Kind, id: string): Promise<Uint8Array> {
 export const putScript = (script: string) => put('script', new TextEncoder().encode(script));
 export const getScript = async (id: string) => new TextDecoder().decode(await get('script', id));
 
-/** Image formats Claude reads. */
+/** Image formats the model reads. */
 export type ImageType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
 /** Under the ~4 MiB of one stream message. The page shrinks images well below this before uploading. */
 export const MAX_IMAGE_BYTES = 3.5 * 1024 * 1024;
 export const MAX_IMAGES = 6;
 
-/** The image's format, from its first bytes; null if it isn't one Claude reads. */
+/** The image's format, from its first bytes; null if it isn't one the model reads. */
 export function imageType(b: Uint8Array): ImageType | null {
   const starts = (...sig: number[]) => sig.every((v, i) => b[i] === v);
   if (starts(0x89, 0x50, 0x4e, 0x47)) return 'image/png';
@@ -60,7 +60,7 @@ export function imageType(b: Uint8Array): ImageType | null {
 
 export const putImage = (bytes: Uint8Array<ArrayBuffer>) => put('image', bytes);
 
-/** A stored image, base64-encoded for the Messages API. */
+/** A stored image, base64-encoded for the model. */
 export async function getImage(id: string): Promise<{ mediaType: ImageType; data: string }> {
   const bytes = await get('image', id);
   const mediaType = imageType(bytes);

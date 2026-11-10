@@ -1,9 +1,9 @@
 # The whole app as one Worker: the page (static assets), the render API, and the orchestration
 # workflows (describe-and-render, render-scene) as a Hatchet serverless endpoint under /hatchet.
 name = "serverless-ray-tracer-site"
-main = "src/index.ts"
+main = "src/cloudflare.ts"
 compatibility_date = "2026-11-01"
-# nodejs_compat exposes secrets on process.env, where the Anthropic SDK reads ANTHROPIC_API_KEY.
+# nodejs_compat exposes secrets on process.env, where src/env.ts reads them.
 # enable_request_signal aborts request.signal when the browser disconnects.
 compatibility_flags = ["nodejs_compat", "enable_request_signal"]
 
@@ -22,5 +22,5 @@ cpu_ms = 300000
 # Secrets (`wrangler secret put`; `.dev.vars` under `wrangler dev`):
 #   HATCHET_CLIENT_TOKEN    tenant API token: starting, cancelling and reading runs and streams
 #   HATCHET_SIGNING_SECRET  >= 32 chars, also given to Hatchet when registering the endpoint
-#   ANTHROPIC_API_KEY       shape-script generation
+#   OPENAI_API_KEY          shape-script generation
 

@@ -48,7 +48,8 @@ place it this way.
 | `crates/endpoint` | Hatchet's [serverless HTTP contract](https://docs.hatchet.run/v1/serverless/http) in Rust, independent of any runtime: signature checks, the healthcheck that declares `render-tile` and `validate-shape`, and the trigger route. |
 | `crates/worker` | The tile Worker: a Cloudflare adapter for `crates/endpoint` (`workers-rs`, compiled to wasm). |
 | `crates/preview` | The page's preview, compiled to wasm for the browser: meshes each part (`mesh.rs`) and finds where each part's `at` is written (`handles.rs`). `scripts/build-preview.sh` builds it into `app/public/preview/`; `wrangler dev` and `wrangler deploy` in `app/` run it. |
-| `app` | One Cloudflare Worker (TypeScript) for everything else: the page (`public/`, with the preview in `preview-view.js` and `preview-worker.js`), the render API (`src/index.ts`), and the workflows `describe-and-render` and `render-scene` (`src/workflows.ts`) served under `/hatchet` with [`@hatchet-dev/serverless`](https://www.npmjs.com/package/@hatchet-dev/serverless). `src/describe.ts` is the model call. |
+| `crates/server` | The same tile endpoint as a native HTTP server (axum), for a container: `deploy/tile.Dockerfile`. |
+| `app` | Everything else (TypeScript): the page (`public/`, with the preview in `preview-view.js` and `preview-worker.js`), the render API (`src/app.ts`), and the workflows `describe-and-render` and `render-scene` (`src/workflows.ts`) served under `/hatchet` with [`@hatchet-dev/serverless`](https://www.npmjs.com/package/@hatchet-dev/serverless). It runs as one Cloudflare Worker (`src/cloudflare.ts`) or one Node server (`src/node.ts`, `deploy/app.Dockerfile`); `src/env.ts` is what differs between them. `src/describe.ts` is the model call (OpenAI). |
 
 ## Deploy
 
@@ -67,7 +68,7 @@ cd ../../app && pnpm install
 openssl rand -hex 32 > .signing-secret
 tr -d '\n' < .signing-secret | pnpm exec wrangler secret put HATCHET_SIGNING_SECRET
 pnpm exec wrangler secret put HATCHET_CLIENT_TOKEN   # tenant API token
-pnpm exec wrangler secret put ANTHROPIC_API_KEY
+pnpm exec wrangler secret put OPENAI_API_KEY
 pnpm exec wrangler deploy
 ```
 
@@ -76,6 +77,25 @@ as a `CLOUDFLARE_WORKERS` endpoint, from the dashboard or with
 `POST /api/v1/stable/tenants/{tenant}/serverless/endpoints`, using that Worker's signing secret.
 
 The URL is public, so put it behind Cloudflare Access before sharing it.
+
+### As containers (e.g. Azure via Porter)
+
+Both halves also run as plain HTTP servers, with the same environment variable names as the
+Workers' secrets. Each serves Hatchet's endpoint at `/hatchet/healthcheck` and `/hatchet/trigger`,
+and `GET /healthz` for the platform's health probe; both listen on `PORT` (default 8080).
+
+```sh
+# The tile server (Rust, native): HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN
+docker build -f deploy/tile.Dockerfile -t ray-tile-server .
+
+# The app (Node): HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN, OPENAI_API_KEY
+scripts/build-app.sh      # the preview module and app/dist/server.mjs (see the SDK note)
+docker build -f deploy/app.Dockerfile -t ray-tracer-app .
+```
+
+Locally, `pnpm run build:node && pnpm start` in `app/` serves the app with `app/.env`.
+Mixing is fine: the app on a container with tiles on the Worker, or the other way around; Hatchet
+only needs each endpoint registered with its URL and signing secret.
 
 **Local development:** `pnpm exec wrangler dev` in `app/` serves the page and the render API with the
 secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that Hatchet calls.
@@ -126,7 +146,7 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   `mix` is a pseudo-random mix). Wrong signatures, unknown fields or wrong types fail in
   `validate-shape` with a message the repair loop sends back to the model.
 - **Reference images.** A chat message can carry up to 6 images (attach, paste, or drop them on the
-  chat). The page shrinks each to what Claude reads (at most 2576 px on the long edge, as JPEG,
+  chat). The page shrinks each to what the model reads (at most 2576 px on the long edge, as JPEG,
   typically well under 1 MB) and uploads it to `POST /api/images` as soon as it is attached; the
   Worker stores it like a script, on `image-<sha256>`, and the message carries the ids.
   `describe-and-render` reads the images and puts them in the model's prompt, so they never pass
@@ -143,8 +163,9 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   Worker starts the workflow, then reads its durable stream topic and forwards each message; the
   first event, `start`, carries the render and run ids. A **Download PNG** button saves the canvas
   at full resolution.
-- **Chat → script.** `describe-and-render` streams the model's script (`claude-opus-5-5` by default,
-  adaptive thinking, with server-side refusal fallback enabled) into the editor as it is written,
+- **Chat → script.** `describe-and-render` streams the model's script (OpenAI's Responses API, `gpt-5.6-sol` at
+  medium reasoning effort by default; Terra and Luna are selectable, and it can use OpenAI's web
+  search) into the editor as it is written,
   validates it with the endpoint's `validate-shape` task, and on a parse error sends the error back
   to the model to fix it, up to 3 attempts. Then it starts `render-scene` as a child workflow,
   passing the validation result along so the script isn't checked twice, and returns without
