@@ -2,7 +2,7 @@
 # render API, orchestration workflows) stays on Cloudflare.
 #
 # Secrets go in a Porter environment group, created before the first deploy:
-#   ray-tile-secrets: HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN
+#   ray-tracer-secrets: HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN
 # Then register https://<this service's domain>/hatchet/healthcheck and /hatchet/trigger with
 # Hatchet as a GENERIC_HTTP endpoint (requestTimeoutSeconds >= 300), and disable the Cloudflare
 # tile endpoint, or both will be sent tiles.
@@ -23,7 +23,7 @@ env:
   MAX_TILES_PER_RENDER: ""
 
 envGroups:
-  - ray-tile-secrets
+  - ray-tracer-secrets
 
 services:
   - name: web
