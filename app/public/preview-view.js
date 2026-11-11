@@ -98,7 +98,7 @@ function update() {
   const text = app.script();
   if (text === synced || text === requested) return;
   requested = text;
-  if (!text.trim()) { clear(); synced = text; return; }
+  if (!text.trim()) { clear(); setNote(''); synced = text; return; }
   setNote('Meshing…');
   worker.postMessage({ id: ++nextId, script: text });
 }

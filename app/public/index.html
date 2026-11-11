@@ -585,9 +585,24 @@ function newChat() {
   cameraPlaced = false;
   document.dispatchEvent(new CustomEvent('camera-changed', { detail: 'framed' }));
   lastRendered = '';
+  clearRender();
   save();
   refresh();
   $('prompt').focus();
+}
+
+/** Back to nothing rendered: a blank image, a reset status line, and no render to resume on reload. */
+function clearRender() {
+  last = null; saveLast();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  $('download').disabled = $('copy').disabled = true;
+  setStatus('Nothing rendered yet');
+  $('tiles').textContent = '0 / 0';
+  $('elapsed').textContent = '0.0s';
+  $('run').textContent = '';
+  $('progress').style.width = '0%';
+  $('meter').textContent = meter(0);
+  showView('render');
 }
 
 let sending = false; // waiting for attached images to finish uploading
