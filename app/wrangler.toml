@@ -6,6 +6,10 @@ compatibility_date = "2026-11-01"
 # nodejs_compat exposes secrets on process.env, where src/env.ts reads them.
 # enable_request_signal aborts request.signal when the browser disconnects.
 compatibility_flags = ["nodejs_compat", "enable_request_signal"]
+# The Hatchet Cloudflare account, which owns hatchet.run.
+account_id = "ce58899025952c372a8f39f38b781fdf"
+# Cloudflare creates the DNS record and certificate for a custom domain on deploy.
+routes = [{ pattern = "ray.hatchet.run", custom_domain = true }]
 
 [assets]
 directory = "public"
@@ -15,7 +19,7 @@ directory = "public"
 command = "../scripts/build-preview.sh"
 watch_dir = "../crates"
 
-# Tiles are spread over a few render tasks (RENDER_TASKS, default 16: about the tile
+# Tiles are spread over a few render tasks (RENDER_TASKS, default 44: about the tile
 # server's cores), so tile size (TILE_MAX_SIZE, default 16) no longer sets how many tasks
 # Hatchet hands out; smaller tiles balance the tasks better.
 

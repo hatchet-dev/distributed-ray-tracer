@@ -16,9 +16,9 @@ build:
 
 env:
   PORT: "8080"
-  # Tiles in flight across all renders: one per core (instances x cpuCores, 2 x 7, plus a
+  # Tiles in flight across all renders: one per core (instances x cpuCores, 2 x 22, plus a
   # couple to cover Hatchet's handoff between tiles). Tiles past this wait in Hatchet's queue.
-  MAX_CONCURRENT_TILES: "16"
+  MAX_CONCURRENT_TILES: "46"
   # No per-render cap (empty = unset; Porter merges env, so removing the line wouldn't clear it).
   MAX_TILES_PER_RENDER: ""
 
@@ -32,9 +32,9 @@ services:
     port: 8080
     # Each pod renders about as many tiles at once as it has cores: keep MAX_CONCURRENT_TILES
     # near instances x cpuCores when changing these.
-    # A 16-core node: two pods of 7 cores, leaving room for the node's own system pods.
-    cpuCores: 7
-    ramMegabytes: 4096
+    # A 48-core node: two pods of 22 cores, leaving room for the node's own system pods.
+    cpuCores: 22
+    ramMegabytes: 8192
     instances: 2
     healthCheck:
       enabled: true

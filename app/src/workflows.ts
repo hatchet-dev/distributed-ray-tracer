@@ -18,7 +18,7 @@ const VALIDATE_SHAPE = 'validate-shape';
  * Render tasks per render: each renders on one core, so about the tile server's total cores.
  * RENDER_TASKS (a var on the app) overrides it.
  */
-const RENDER_TASKS = 16;
+const RENDER_TASKS = 44;
 /**
  * Most image bytes one task returns (its tiles' packed RGB; base64 adds a third): task outputs
  * travel through Hatchet in one message, so big images get more tasks.
