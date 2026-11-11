@@ -175,7 +175,8 @@
   #render-panel { top: 16px; right: 16px; width: 300px; max-width: calc(100vw - 32px);
                   display: flex; flex-direction: column; gap: 10px; }
   #render-panel #render { width: 100%; height: 38px; font-size: 12px; }
-  #download { width: 100%; margin-top: -4px; }
+  #image-actions { margin-top: -4px; }
+  #image-actions button { width: 100%; }
   #status-box { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; display: grid; gap: 4px;
                 border-top: 1px dashed var(--glass-line); padding-top: 10px; }
   #status-box b { color: var(--text); font-weight: 500; }
@@ -322,7 +323,10 @@
     </label>
   </div>
   <button id="render" type="button" disabled title="Render the current script (⌘/Ctrl+Enter in the script)">Render</button>
-  <button id="download" class="secondary" type="button" disabled title="Save the image as a PNG at full resolution">Download PNG</button>
+  <div class="row" id="image-actions">
+    <button id="download" class="secondary" type="button" disabled title="Save the image as a PNG at full resolution">Download PNG</button>
+    <button id="copy" class="secondary" type="button" disabled title="Copy the image to the clipboard, at full resolution">Copy image</button>
+  </div>
   <div id="status-box">
     <span id="status">Nothing rendered yet</span>
     <span id="meter" aria-hidden="true"></span>
@@ -355,6 +359,20 @@ $('download').addEventListener('click', () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
   }, 'image/png');
 });
+// Copy the canvas to the clipboard as a PNG. The image is handed over as a promise, made within
+// the click, which Safari requires.
+$('copy').addEventListener('click', async () => {
+  const b = $('copy');
+  const flash = (text) => { b.textContent = text; setTimeout(() => (b.textContent = 'Copy image'), 1500); };
+  try {
+    const png = new Promise((ok, no) => canvas.toBlob((blob) => (blob ? ok(blob) : no(new Error('could not encode the image'))), 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+    flash('Copied');
+  } catch (err) {
+    console.error('copy failed', err);
+    flash('Copy failed');
+  }
+});
 let request = null, timer = null; // request: the running render's AbortController (starting another aborts it)
 let running = null; // 'chat' (writing a script, then rendering it) | 'render' | null
 
@@ -373,10 +391,30 @@ const STORE = 'ray-tracer-chat';
 function save() {
   try { localStorage.setItem(STORE, JSON.stringify({ ...chat, script: $('shape').value, camera, cameraPlaced })); } catch {}
 }
+/** What a first visit (no saved session) starts with, so there's something to look at and render. */
+const DEFAULT_SCRIPT = `// Two spheres on a checkered floor: one glass, one mirror. Describe a shape in the chat to
+// replace them, or drag them around in the preview.
+fn checker(p, n) {
+  let c = fract(0.5 * (floor(p.x) + floor(p.y))) * 2.0;
+  #{ color: mix("#23262d", "#ece8df", c), roughness: 0.35 }
+}
+let ball = sphere([0, 0, 1], 1);
+#{
+  parts: [
+    #{ label: "glass ball", shape: ball, at: [-1.2, 0.8, 0.0], material: #{ glass: true, ior: 1.5 } },
+    #{ label: "mirror ball", shape: ball, at: [1.2, -0.8, 0.0], material: #{ color: "#dcdde2", metallic: 1.0, roughness: 0.03 } },
+  ],
+  floor: #{ color: "#ece8df", shader: checker },
+  lights: [ #{ sphere: [-3.0, -4.0, 7.0], radius: 1.5, intensity: 10 } ],
+  sky: "#a7b7cb",
+}`;
 function load() {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(STORE) || 'null'); } catch {}
-  if (!saved || !Array.isArray(saved.history)) return;
+  if (!saved || !Array.isArray(saved.history)) {
+    $('shape').value = chat.generated = DEFAULT_SCRIPT; // not a hand edit
+    return;
+  }
   chat = { history: saved.history, generated: saved.generated || '', log: saved.log || [] };
   $('shape').value = saved.script || '';
   if (saved.camera) Object.assign(camera, saved.camera);
@@ -576,7 +614,8 @@ async function send() {
   }
 
   const description = typed || `Model what the reference ${images.length === 1 ? 'image shows' : 'images show'}`;
-  const refining = hasScript();
+  // The untouched default scene is only a placeholder: a first message describes a new shape.
+  const refining = hasScript() && !(script() === DEFAULT_SCRIPT && !chat.history.length);
   if (refining && script() !== chat.generated) addMessage('note', 'Using your edited script');
   addMessage('user', typed, '', true, images.map((i) => i.thumb));
   $('prompt').value = ''; fitPrompt();
@@ -798,7 +837,7 @@ function resumeLast(retry = 0) {
 async function follow({ kind, turn, width, height, startedAt, connect, resumed = false, retry = 0 }) {
   stop();
   showView('render');
-  $('download').disabled = true; // until this render's first tile, the canvas holds the dimmed old frame
+  $('download').disabled = $('copy').disabled = true; // until this render's first tile, the canvas holds the dimmed old frame
   if (resumed || canvas.width !== width || canvas.height !== height) {
     canvas.width = width; canvas.height = height;
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height);
@@ -888,7 +927,7 @@ async function follow({ kind, turn, width, height, startedAt, connect, resumed =
     }
     ctx.putImageData(img, t.x, t.y);
     tiles++;
-    $('download').disabled = false;
+    $('download').disabled = $('copy').disabled = false;
   });
   on('done', () => {
     tick(); onStop = null;
