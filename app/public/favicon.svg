@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The page's ▚▞ mark: two quadrant blocks, on navy. -->
+  <rect width="32" height="32" rx="6" fill="#0A1029"/>
+  <g fill="#3392FF">
+    <rect x="4" y="10" width="6" height="6"/>
+    <rect x="10" y="16" width="6" height="6"/>
+    <rect x="22" y="10" width="6" height="6"/>
+    <rect x="16" y="16" width="6" height="6"/>
+  </g>
+</svg>
