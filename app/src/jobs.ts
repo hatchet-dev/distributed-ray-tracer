@@ -3,7 +3,7 @@ import { DEFAULT_EFFORT, DEFAULT_MODEL, EFFORTS, MODELS, type Effort, type Model
 import { MAX_IMAGES } from './scripts.js';
 
 /** Bounds checked up front so a bad request doesn't spawn thousands of failing tiles. */
-const LIMITS = { width: [1, 7680], height: [1, 4320], samples: [1, 4096], bounces: [0, 16] } as const;
+const LIMITS = { width: [1, 7680], height: [1, 4320], samples: [1, 512], bounces: [0, 15] } as const;
 /** Matches crates/scene; fits in one durable stream message, where scripts are stored (scripts.ts). */
 export const MAX_SCRIPT_BYTES = 3 * 1024 * 1024;
 const MAX_DESCRIPTION_CHARS = 2000;

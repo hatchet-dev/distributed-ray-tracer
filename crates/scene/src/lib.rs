@@ -119,13 +119,18 @@ pub struct Tile {
     pub h: u32,
 }
 
+/// Most samples per pixel and bounces per path a render may ask for (app/src/jobs.ts checks the
+/// same before starting a render).
+pub const MAX_SAMPLES: u32 = 512;
+pub const MAX_BOUNCES: u32 = 15;
+
 impl RenderParams {
     pub fn validate(&self, tile: &Tile) -> Result<(), String> {
         if !(1..=7680).contains(&self.width) || !(1..=4320).contains(&self.height) {
             return Err("image must be at most 7680x4320".into());
         }
-        if !(1..=4096).contains(&self.samples) || self.bounces > 16 {
-            return Err("samples must be in 1..=4096 and bounces in 0..=16".into());
+        if !(1..=MAX_SAMPLES).contains(&self.samples) || self.bounces > MAX_BOUNCES {
+            return Err(format!("samples must be in 1..={MAX_SAMPLES} and bounces in 0..={MAX_BOUNCES}"));
         }
         if tile.w == 0 || tile.h == 0 || tile.w * tile.h > 256 * 256 {
             return Err("tile must be non-empty and at most 256x256 pixels".into());

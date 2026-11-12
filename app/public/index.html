@@ -387,7 +387,6 @@
       <option value="640x360,16,4">Preview</option>
       <option value="1280x720,64,5" selected>HD</option>
       <option value="1920x1080,128,6">Full HD</option>
-      <option value="3840x2160,256,8">4K</option>
       <option value="">Custom</option>
     </select>
   </label>
@@ -398,14 +397,13 @@
         <option value="1280x720">1280×720</option>
         <option value="1920x1080">1920×1080</option>
         <option value="2560x1440">2560×1440</option>
-        <option value="3840x2160">3840×2160</option>
       </select>
     </label>
     <label title="Max samples: the most paths traced per pixel. Smooth areas stop early once their noise is below what 8-bit color shows; noisy areas (edges, soft shadows, glass) use up to this many">Samples
-      <input id="samples" type="number" min="1" max="4096" step="1" inputmode="numeric" />
+      <input id="samples" type="number" min="1" max="512" step="1" inputmode="numeric" />
     </label>
     <label title="How many times a path can bounce: more lights crevices and glass, and is slower">Bounces
-      <input id="bounces" type="number" min="0" max="16" step="1" inputmode="numeric" />
+      <input id="bounces" type="number" min="0" max="15" step="1" inputmode="numeric" />
     </label>
   </div>
   <button id="render" type="button" disabled title="Render the current script (⌘/Ctrl+Enter in the script)">Render</button>
@@ -843,8 +841,8 @@ applyPreset();
 function quality() {
   const [width, height] = $('resolution').value.split('x').map(Number);
   const samples = Number($('samples').value), bounces = Number($('bounces').value);
-  if (!Number.isInteger(samples) || samples < 1 || samples > 4096) return 'Max samples must be a whole number from 1 to 4096';
-  if (!Number.isInteger(bounces) || bounces < 0 || bounces > 16) return 'Bounces must be a whole number from 0 to 16';
+  if (!Number.isInteger(samples) || samples < 1 || samples > 512) return 'Max samples must be a whole number from 1 to 512';
+  if (!Number.isInteger(bounces) || bounces < 0 || bounces > 15) return 'Bounces must be a whole number from 0 to 15';
   return { width, height, samples, bounces };
 }
 
