@@ -53,11 +53,13 @@ services:
 
   - name: chat
     type: web
-    run: node /app/server.mjs
+    # Node's heap is capped at a few GB by default whatever the pod has; let it use 28 of the
+    # pod's 32 GB, leaving the rest for buffers and native memory.
+    run: node --max-old-space-size=28672 /app/server.mjs
     port: 8080
-    # Model calls and orchestration: mostly waiting on the network, so small pods.
+    # Model calls and orchestration: mostly waiting on the network, so few cores.
     cpuCores: 2
-    ramMegabytes: 2048
+    ramMegabytes: 32768
     autoscaling:
       enabled: true
       minInstances: 1
