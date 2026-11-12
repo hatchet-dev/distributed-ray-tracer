@@ -230,8 +230,10 @@ fn healthcheck(cfg: &Config) -> Value {
         // 5xx responses (including Cloudflare's own, e.g. CPU-limit kills under load) are
         // retried with exponential backoff: 2s, 4s, 8s, 16s, then every 30s, so retries
         // don't land in the same burst that caused the failure. 4xx are not retried.
+        // When renders overlap, their tasks wait for slots behind earlier renders' (several
+        // minutes for a big render): Hatchet's default schedule timeout (5m) would fail them.
         "tasks": [{
-            "readableId": RENDER, "action": RENDER_ACTION, "timeout": "300s",
+            "readableId": RENDER, "action": RENDER_ACTION, "timeout": "300s", "scheduleTimeout": "30m",
             "retries": 8, "backoffFactor": 2.0, "backoffMaxSeconds": 30,
         }],
     });
