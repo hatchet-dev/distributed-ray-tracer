@@ -37,7 +37,13 @@ services:
     # A 48-core node: two pods of 22 cores, leaving room for the node's own system pods.
     cpuCores: 22
     ramMegabytes: 8192
-    instances: 2
+    # Scales with load (there is no overall cap on tiles in flight): a pod is added when average
+    # CPU use passes 70%, up to 10 pods; at least one stays up.
+    autoscaling:
+      enabled: true
+      minInstances: 1
+      maxInstances: 10
+      cpuThresholdPercent: 70
     healthCheck:
       enabled: true
       httpPath: /healthz
