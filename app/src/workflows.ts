@@ -67,13 +67,31 @@ async function validate(ctx: Ctx, scriptId: string): Promise<Validation> {
   }
 }
 
+/**
+ * Whether the task is being evicted: the runtime aborts the task's signal with an `evicted`
+ * `TaskRunTerminatedError`, and pending waits reject with that or a plain abort error.
+ */
+const evicting = (ctx: Ctx) => {
+  const { reason } = ctx.abortController.signal;
+  return reason instanceof TaskRunTerminatedError && reason.reason === 'evicted';
+};
+
+/**
+ * A child's output from the durable log: the payload the engine recorded, which is the task's own
+ * output rather than the run's (keyed by task name). Accepts either.
+ */
+function taskOutput<T>(out: unknown, task: string): T {
+  const keyed = out as Record<string, T> | undefined;
+  return keyed && typeof keyed === 'object' && task in keyed ? keyed[task] : (out as T);
+}
+
 /** `validate` for a durable task, whose children go through the durable log. */
 async function validateDurable(ctx: DurableContext<RenderSceneInput>, scriptId: string): Promise<Validation> {
   try {
-    const out = await ctx.spawnChild<{ scriptId: string }, { [VALIDATE_SHAPE]: Validation }>(VALIDATE_SHAPE, { scriptId });
-    return out[VALIDATE_SHAPE];
+    const out = await ctx.spawnChild<{ scriptId: string }, Validation>(VALIDATE_SHAPE, { scriptId });
+    return taskOutput<Validation>(out, VALIDATE_SHAPE);
   } catch (err) {
-    if (err instanceof TaskRunTerminatedError) throw err;
+    if (err instanceof TaskRunTerminatedError || evicting(ctx)) throw err;
     throw new Error(describe(err));
   }
 }
@@ -133,7 +151,7 @@ async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Pr
     if (done) await publish(ctx, topic, { type: 'done' });
     return out;
   } catch (err) {
-    if (!(err instanceof TaskRunTerminatedError && err.reason === 'evicted')) {
+    if (!(err instanceof TaskRunTerminatedError && err.reason === 'evicted') && !evicting(ctx)) {
       await publish(ctx, topic, { type: 'error', message: describe(err) }).catch(() => {});
     }
     throw err;
@@ -201,10 +219,10 @@ export const renderScene = hatchet.durableTask({
           tasks.map((part) => ({ workflow: RENDER_TILES, input: { ...params, tiles: part, scriptId, topic } }))
         );
       } catch (err) {
-        if (err instanceof TaskRunTerminatedError) throw err;
+        if (err instanceof TaskRunTerminatedError || evicting(ctx)) throw err;
         throw new Error(`a render task failed: ${describe(err)}`);
       }
-      const missing = outs.filter((out, k) => out?.[RENDER_TILES]?.tiles !== tasks[k].length).length;
+      const missing = outs.filter((out, k) => taskOutput<{ tiles?: number }>(out, RENDER_TILES)?.tiles !== tasks[k].length).length;
       if (missing) throw new Error(`${missing} of ${n} render tasks finished without all their tiles`);
       return { tiles: tiles.length };
     }),
