@@ -1,4 +1,4 @@
-import { clientFromContext, hatchet, TaskRunTerminatedError, type DurableContext } from '@hatchet-dev/serverless';
+import { clientFromContext, hatchet, NonRetryableError, TaskRunTerminatedError, type DurableContext } from '@hatchet-dev/serverless';
 import { ScriptWriter } from './describe';
 import { getImage, getScript, putScript } from './scripts';
 import { secret } from './env';
@@ -25,6 +25,8 @@ const RENDER_TASKS = 44;
  * get more tasks.
  */
 const MAX_TASK_BYTES = 1_500_000;
+/** How often the model's streamed script text is published (batched in between). */
+const DELTA_INTERVAL_MS = 500;
 /** Description -> script attempts before giving up (the first plus repairs). */
 const SCRIPT_ATTEMPTS = 3;
 /**
@@ -143,9 +145,11 @@ function frame(camera: Camera, bounds: Bounds, width: number, height: number): C
 /**
  * Run `fn`, publishing `error` if it fails, and `done` if it succeeds and `done` is set. A durable
  * task's eviction isn't a failure (the engine runs it again once its children finish), so it
- * publishes nothing.
+ * publishes nothing. With `retriesOnlyCrashes`, a failure `fn` throws is final: the task's retries
+ * are only for an invocation that never finished (Cloudflare shedding the Worker, say), which
+ * throws nothing here and so publishes nothing either.
  */
-async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Promise<T>): Promise<T> {
+async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Promise<T>, retriesOnlyCrashes = false): Promise<T> {
   try {
     const out = await fn();
     if (done) await publish(ctx, topic, { type: 'done' });
@@ -154,6 +158,7 @@ async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Pr
     if (!(err instanceof TaskRunTerminatedError && err.reason === 'evicted') && !evicting(ctx)) {
       await publish(ctx, topic, { type: 'error', message: describe(err) }).catch(() => {});
     }
+    if (retriesOnlyCrashes && !(err instanceof TaskRunTerminatedError)) throw new NonRetryableError(describe(err));
     throw err;
   }
 }
@@ -237,9 +242,16 @@ export const renderScene = hatchet.durableTask({
 export const describeAndRender = hatchet.task({
   name: 'describe-and-render',
   executionTimeout: '60m',
+  // Cloudflare occasionally sheds the Worker invocation mid model call (it reports a websocket that
+  // closed without a done frame); Hatchet then runs the task again. Failures the task reports
+  // itself are not retried (see `finishing`).
+  retries: 2,
   fn: async (input: DescribeInput, ctx) =>
     // The render finishes the stream (render-scene publishes `done`); this only reports failures.
     finishing(ctx, input.topic, false, async () => {
+      if (ctx.retryCount() > 0) {
+        await publish(ctx, input.topic, { type: 'status', message: 'The connection to the model dropped; starting over…' });
+      }
       const { topic, description, model, effort, scriptId: currentId, history, imageIds = [], frame: shouldFrame = true, ...settings } = input;
       const current = currentId === undefined ? undefined : await getScript(currentId);
       const images = await Promise.all(imageIds.map(getImage));
@@ -255,16 +267,42 @@ export const describeAndRender = hatchet.task({
           type: 'status',
           message: attempt === 1 ? `${verb} shape script…` : `Fixing shape script (attempt ${attempt})…`,
         });
-        // Forward the model's text as it streams, so the editor fills in live.
+        // Forward the model's text as it streams, so the editor fills in live: batched, one
+        // message per DELTA_INTERVAL_MS at most. One publish per model chunk (hundreds per script)
+        // got the invocation load-shed by Cloudflare partway through.
         let pending = Promise.resolve();
+        let buffered = '';
+        // The first delta clears the editor: after a retry it holds the dropped run's text.
+        let restartNext = true;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const flush = () => {
+          clearTimeout(timer);
+          timer = undefined;
+          if (!buffered && !restartNext) return;
+          const msg: StreamMessage = { type: 'script-delta', attempt, text: buffered, restart: restartNext };
+          buffered = '';
+          restartNext = false;
+          pending = pending.then(() => publish(ctx, topic, msg));
+        };
         const onText = (text: string, restart: boolean) => {
-          pending = pending.then(() => publish(ctx, topic, { type: 'script-delta', attempt, text, restart }));
+          if (restart) {
+            // Text before a restart is dropped by the page anyway.
+            buffered = '';
+            restartNext = true;
+          }
+          buffered += text;
+          timer ??= setTimeout(flush, DELTA_INTERVAL_MS);
         };
         const onSearch = () => {
+          flush();
           pending = pending.then(() => publish(ctx, topic, { type: 'status', message: 'Searching the web…' }));
         };
         const progress = { text: onText, search: onSearch };
-        script = attempt === 1 ? await writer.write(progress) : await writer.repair(lastError, progress);
+        try {
+          script = attempt === 1 ? await writer.write(progress) : await writer.repair(lastError, progress);
+        } finally {
+          flush();
+        }
         await pending;
         await publish(ctx, topic, { type: 'script', attempt, script });
 
@@ -291,7 +329,7 @@ export const describeAndRender = hatchet.task({
       // the model call and the whole render. The render API watches the returned run instead.
       const render = await ctx.runNoWaitChild(renderScene, { ...settings, scriptId, topic, frame: reframe, checked });
       return { script, renderRunId: await render.getWorkflowRunId() };
-    }),
+    }, true),
 });
 
 export const workflows = [renderScene, describeAndRender];
