@@ -1,23 +1,13 @@
-# serverless-ray-tracer
+# Distributed Ray Tracer
 
-This demo renders images through a ray-tracing technique called Signed Distance Fields. The entire
-ray-traced scene is represented as code and written by a language model. Because this technique is
-embarrassingly parallel, each tile of the image can render simultaneously up to a very high
-resolution. [Hatchet](https://hatchet.run) is used to orchestrate the parallel tiles, using Cloudflare
-Workers running Rust as the underlying compute (with an option to run on even larger, standalone
-machines if needed). The coding agent also uses Hatchet + Cloudflare and durable streams are used for
-passing messages back to each frontend.
+This demo renders images through a ray-tracing technique called Signed Distance Fields. The entire ray-traced scene is represented as code and written by a language model. Because this technique is embarrassingly parallel, each tile of the image can render simultaneously up to a very high resolution. [Hatchet](https://hatchet.run) is used to orchestrate the parallel tiles, using [Cloudflare Workers running Rust](https://developers.cloudflare.com/workers/languages/rust/) as the underlying compute (with an option to run on even larger, standalone machines if needed). The coding agent also uses Hatchet + Cloudflare and durable streams are used for passing messages back to each frontend.
 
 This was built to showcase two new Hatchet features:
 
-- Serverless endpoints
-- Durable streams
+- [Serverless endpoints](https://docs.hatchet.run/v1/serverless)
+- [Durable streams](https://docs.hatchet.run/reference/typescript/feature-clients/streams)
 
-Signed Distance Fields are a technique popularized by
-[Inigo Quilez](https://iquilezles.org/articles/raymarchingdf/). This renderer uses a DSL based on
-[Rhai](https://github.com/rhaiscript/rhai) and [Fidget](https://github.com/mkeeter/fidget) to define
-the SDFs, which you can edit yourself. This approach is uniquely suited to refining with LLMs because
-it represents the entire ray-traced scene as code.
+Signed Distance Fields are a technique popularized by [Inigo Quilez](https://iquilezles.org/articles/raymarchingdf/). This renderer uses a DSL based on [Rhai](https://github.com/rhaiscript/rhai) and [Fidget](https://github.com/mkeeter/fidget) to define the SDFs, which you can edit yourself. This approach is uniquely suited to refining with LLMs because it represents the entire ray-traced scene as code.
 
 The renderer itself is a slightly modified version of [rpt](https://github.com/ekzhang/rpt).
 
@@ -48,7 +38,7 @@ the camera. The render options (resolution, maximum samples per pixel, bounces) 
 shows a live 3D preview of the script: each part meshed in the browser by Fidget's mesher
 (`crates/preview`, compiled to wasm) and drawn with three.js. It
 updates as you edit the script. Drag the background to orbit the view, shift-drag to pan, scroll to
-zoom; arrow keys walk the view around (shift+arrows turn and tilt it). The render camera is an object in the scene, drawn with its frustum: click it to move it (W)
+zoom (on a phone: drag with one finger, pinch to zoom); arrow keys walk the view around (shift+arrows turn and tilt it). The render camera is an object in the scene, drawn with its frustum: click it to move it (W)
 or turn it (E; left/right and up/down, since the renderer's camera is always level), and the next
 render is taken from there. Once placed by hand, renders keep the camera where it is instead of
 re-framing it on the shape (a new chat frames afresh). "Camera view" (C) shows exactly what
