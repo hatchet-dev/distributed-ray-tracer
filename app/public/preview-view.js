@@ -1,6 +1,6 @@
 // The live preview: the script's parts as meshes in three.js, with the render camera as an object
 // in the scene. Drag the background to orbit the view, shift-drag to pan, scroll to zoom; arrow
-// keys walk the view around (shift+arrows turn and tilt it).
+// keys walk the view around (shift+arrows turn and tilt it). On touch screens, pinch to zoom.
 //
 // - Click a labelled part and drag its arrows to move it (W), or its rings to turn it (E): on
 //   release, the `[x, y, z]` its `at` or `rotate` is written as (found by crates/preview) is
@@ -17,6 +17,11 @@ const app = window.app; // set by the page's main script
 const $ = (id) => document.getElementById(id);
 const canvas = $('preview');
 const labelsEl = $('preview-labels');
+// The preview's size in CSS px: the whole window on wide screens, the stage at the top on small
+// ones (the page's stacked layout, the same media query as its CSS).
+const viewW = () => canvas.clientWidth || innerWidth;
+const viewH = () => canvas.clientHeight || innerHeight;
+const stacked = matchMedia('(max-width: 900px), (max-height: 520px)');
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -390,16 +395,16 @@ function asRenderCamera(camera) {
 
 /**
  * The part of the window the page's side panels leave uncovered, in px: the preview centers its
- * view there. On narrow screens the panels stack instead, so it's the whole width.
+ * view there. On small screens the panels stack below the preview instead, so it's all of it.
  */
 function openArea() {
-  const area = { left: 0, right: innerWidth, top: 0, bottom: innerHeight };
-  if (innerWidth <= 900 || document.body.classList.contains('hide-ui')) return area;
+  const area = { left: 0, right: viewW(), top: 0, bottom: viewH() };
+  if (stacked.matches || document.body.classList.contains('hide-ui')) return area;
   const chat = document.getElementById('chat')?.getBoundingClientRect();
   const panel = document.getElementById('render-panel')?.getBoundingClientRect();
   if (chat?.width) area.left = chat.right;
   if (panel?.width) area.right = panel.left;
-  if (area.right - area.left < 240) return { ...area, left: 0, right: innerWidth };
+  if (area.right - area.left < 240) return { ...area, left: 0, right: viewW() };
   area.top = 130; // below the view switch and tools
   return area;
 }
@@ -410,7 +415,7 @@ function defaultView() {
   const c = app.camera;
   const mid = eyeOf(c).add(new THREE.Vector3(...c.target)).multiplyScalar(0.5);
   const { left, right } = openArea();
-  const narrow = Math.max(1, (0.9 * innerWidth) / (right - left));
+  const narrow = Math.max(1, (0.9 * viewW()) / (right - left));
   return { target: mid.toArray(), azimuth: c.azimuth + 75, elevation: 32, distance: Math.min(90, (c.distance * 1.5 + 2.5) * narrow) };
 }
 
@@ -419,7 +424,7 @@ function placeCamera() {
     asRenderCamera(cam);
     // The render's resolution, cropped to cover the window as the page shows the render.
     const { width: W, height: H } = app.resolution();
-    const [w, h] = [innerWidth, innerHeight];
+    const [w, h] = [viewW(), viewH()];
     const s = Math.max(w / W, h / H);
     cam.setViewOffset(W * s, H * s, (W * s - w) / 2, (H * s - h) / 2, w, h);
   } else {
@@ -429,10 +434,10 @@ function placeCamera() {
     cam.fov = 45;
     // Center the view in the open area: a wider frustum, cropped off-center.
     const { left, right } = openArea();
-    const shift = (left + right) / 2 - innerWidth / 2;
-    const full = innerWidth + 2 * Math.abs(shift);
-    cam.aspect = full / innerHeight;
-    cam.setViewOffset(full, innerHeight, shift > 0 ? 0 : 2 * -shift, 0, innerWidth, innerHeight);
+    const shift = (left + right) / 2 - viewW() / 2;
+    const full = viewW() + 2 * Math.abs(shift);
+    cam.aspect = full / viewH();
+    cam.setViewOffset(full, viewH(), shift > 0 ? 0 : 2 * -shift, 0, viewW(), viewH());
   }
   cam.updateProjectionMatrix();
   // The camera object follows the render camera (unless it's being dragged: then it leads).
@@ -491,7 +496,7 @@ function walk(side, ahead) {
 function pan(dx, dy) {
   if (lookThrough) return orbit(dx, dy);
   view ??= defaultView();
-  const scale = (2 * view.distance * Math.tan((cam.fov * RAD) / 2)) / innerHeight;
+  const scale = (2 * view.distance * Math.tan((cam.fov * RAD) / 2)) / viewH();
   const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
   const up = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
   view.target = new THREE.Vector3(...view.target).addScaledVector(right, -dx * scale).addScaledVector(up, dy * scale).toArray();
@@ -516,18 +521,38 @@ function cameraInView() {
   cam.updateMatrixWorld();
   const p = renderCam.position.clone().project(cam);
   const ahead = cam.getWorldDirection(new THREE.Vector3()).dot(renderCam.position.clone().sub(cam.position)) > 0;
-  const [x, y] = [((p.x + 1) / 2) * innerWidth, ((1 - p.y) / 2) * innerHeight];
+  const [x, y] = [((p.x + 1) / 2) * viewW(), ((1 - p.y) / 2) * viewH()];
   const a = openArea();
   return ahead && x > a.left + 40 && x < a.right - 40 && y > a.top + 20 && y < a.bottom - 60;
 }
 
 let drag = null;
+// Touch: one finger orbits, two pinch to zoom (and are never a click).
+const touches = new Map();
+let pinch = 0;
+const spread = () => { const [a, b] = [...touches.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
 canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size === 2) { pinch = spread(); drag = null; return; }
+  }
   if (tc.axis) return; // on the gizmo: TransformControls drags the selection
   drag = { x: e.clientX, y: e.clientY, moved: false };
   canvas.setPointerCapture(e.pointerId);
 });
+const lift = (e) => {
+  touches.delete(e.pointerId);
+  if (touches.size < 2) pinch = 0;
+};
+canvas.addEventListener('pointercancel', (e) => { lift(e); drag = null; });
 canvas.addEventListener('pointermove', (e) => {
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && touches.size === 2) {
+    const now = spread();
+    if (now > 0) zoom(pinch / now);
+    pinch = now;
+    return;
+  }
   if (!drag || tc.dragging) return;
   const [dx, dy] = [e.clientX - drag.x, e.clientY - drag.y];
   if (!drag.moved && Math.hypot(dx, dy) < 4) return;
@@ -536,10 +561,12 @@ canvas.addEventListener('pointermove', (e) => {
   (e.shiftKey ? pan : orbit)(dx, dy);
 });
 canvas.addEventListener('pointerup', (e) => {
+  lift(e);
   const click = drag && !drag.moved;
   drag = null;
   if (!click || tc.dragging) return;
-  const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  const r = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - r.left) / viewW()) * 2 - 1, -((e.clientY - r.top) / viewH()) * 2 + 1);
   const ray = new THREE.Raycaster();
   ray.setFromCamera(ndc, cam);
   const targets = parts.map((p) => p.mesh);
@@ -585,14 +612,14 @@ function requestRender() {
 }
 function draw() {
   frame = 0;
-  renderer.setSize(innerWidth, innerHeight, false);
+  renderer.setSize(viewW(), viewH(), false);
   placeCamera();
   if (revealCamera && !lookThrough) {
     revealCamera = false;
     if (!cameraInView()) { view = defaultView(); placeCamera(); }
   }
   // The camera object keeps a readable size on screen (about 30 px tall), however far away it is.
-  const size = (cam.position.distanceTo(renderCam.position) * 2 * Math.tan((cam.fov * RAD) / 2) * 30) / innerHeight / 0.24;
+  const size = (cam.position.distanceTo(renderCam.position) * 2 * Math.tan((cam.fov * RAD) / 2) * 30) / viewH() / 0.24;
   camBody.scale.setScalar(Math.max(0.2, size));
   renderer.render(scene, cam);
   // Labels sit above each part's box, and above the camera.
@@ -601,7 +628,7 @@ function draw() {
     point.project(cam);
     const visible = show && point.z < 1 && Math.abs(point.x) < 1.2 && Math.abs(point.y) < 1.2;
     el.hidden = !visible;
-    if (visible) el.style.transform = `translate(${(point.x + 1) / 2 * innerWidth}px, ${(1 - point.y) / 2 * innerHeight}px) translate(-50%, -130%)`;
+    if (visible) el.style.transform = `translate(${(point.x + 1) / 2 * viewW()}px, ${(1 - point.y) / 2 * viewH()}px) translate(-50%, -130%)`;
   };
   for (const p of parts) {
     if (!p.labelEl) continue;

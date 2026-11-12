@@ -219,14 +219,52 @@
   #about a:hover { color: var(--cyan); }
   #about-close { position: absolute; top: 12px; right: 12px; }
 
-  @media (max-width: 900px) {
-    #render-panel { top: 8px; right: 8px; left: 8px; width: auto; max-width: none; padding: 10px; gap: 8px; }
-    #chat { top: auto; left: 8px; right: 8px; bottom: 60px; width: auto; max-width: none; height: 55vh; }
-    #shape { height: 120px; }
-    #view-switch { top: auto; bottom: 14px; left: 8px; transform: none; }
-    body.hide-ui #view-switch { transform: translateY(4px); }
-    body.previewing #preview-note { top: auto; bottom: calc(55vh + 70px); }
-    body.previewing #preview-tools { top: auto; bottom: 14px; left: auto; right: 112px; transform: none; }
+  /* Small screens (phones, portrait tablets, landscape phones): the render or preview sits in a
+     16:9 stage pinned to the top, and the panels scroll below it. preview-view.js matches this
+     media query, and sizes the preview to its canvas. */
+  @media (max-width: 900px), (max-height: 520px) {
+    :root { --stage-h: min(56.25vw, 46svh); --stage-w: min(100vw, calc(var(--stage-h) * 16 / 9)); }
+    html, body { height: auto; overflow: visible; }
+    body { display: flex; flex-direction: column; gap: 8px; padding: calc(var(--stage-h) + 8px) 8px 16px; }
+    body::before { content: ""; position: fixed; inset: 0 0 auto; height: var(--stage-h); z-index: 2;
+                   background: var(--navy-dark); border-bottom: 1px solid var(--glass-line); }
+    #c, body.previewing #preview, body.previewing #preview-labels {
+      position: fixed; inset: 0 0 auto; margin: 0 auto; width: var(--stage-w); height: var(--stage-h); z-index: 3; }
+    body.previewing #preview-labels { overflow: hidden; }
+    #view-switch { top: 8px; left: 8px; transform: none; z-index: 4; }
+    body.previewing #preview-tools { top: calc(var(--stage-h) - 39px); right: 8px; left: auto; transform: none; z-index: 4; }
+    body.previewing #preview-note { top: calc(var(--stage-h) - 36px); left: calc((100vw - var(--stage-w)) / 2 + 8px);
+                                    right: max(calc((100vw - var(--stage-w)) / 2 + 8px), 120px); max-width: none;
+                                    transform: none; z-index: 4; font-size: 11px; line-height: 1.35; text-align: left;
+                                    display: flex; align-items: flex-end; height: 28px; }
+    .seg button { padding: 4px 8px; font-size: 10px; }
+    .bar { top: calc(var(--stage-h) - 2px); bottom: auto; z-index: 4; }
+
+    /* The panels, in the page's flow. */
+    .panel#chat, .panel#render-panel { position: relative; inset: auto; width: auto; max-width: none; }
+    #chat { gap: 10px; }
+    #log { flex: none; min-height: 120px; max-height: 45svh; }
+    #shape { height: 180px; max-height: 50svh; }
+    .composer-foot { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .composer-foot button { width: 100%; }
+    /* Nothing to hide the panels from: they're below the stage. */
+    #toggle-ui { display: none; }
+    body.hide-ui .panel, body.hide-ui .bar { opacity: 1; pointer-events: auto; transform: none; }
+    body.hide-ui #preview-note, body.hide-ui #preview-labels { opacity: 1; }
+
+    #about { padding: 18px 16px; max-height: calc(100svh - 32px); }
+    #about-close { top: 10px; right: 10px; }
+  }
+  /* Wide enough for the panels side by side under the stage. */
+  @media (min-width: 600px) and (max-width: 900px), (min-width: 600px) and (max-height: 520px) {
+    body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
+    .row.three { grid-template-columns: 1.7fr 1fr 1fr; }
+  }
+  /* Touch screens: 16px fields, so focusing one doesn't zoom the page; and no Esc key. */
+  @media (pointer: coarse) {
+    #prompt, #shape, select, input[type=number] { font-size: 16px; line-height: 22px; }
+    #about-close { font-size: 0; gap: 0; }
+    #about-close::after { content: "Close"; font-size: 11px; }
   }
 </style>
 </head>
