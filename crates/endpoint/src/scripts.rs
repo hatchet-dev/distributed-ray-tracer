@@ -6,6 +6,9 @@
 //! one enveloped protobuf request, then read enveloped protobuf messages from the response body
 //! until the first entry arrives. This module builds the request and decodes the response; the
 //! adapter does the I/O.
+//!
+//! Render tasks also publish their tiles to the render's topic with the engine's unary
+//! `v1.V1Streams/Publish` call, Connect over HTTP too (see [`publish_body`]).
 
 use base64::Engine;
 
@@ -14,6 +17,11 @@ pub const SUBSCRIBE_PATH: &str = "/v1.V1Streams/Subscribe";
 /// Headers the subscribe request needs (plus `Authorization: Bearer <token>`).
 pub const SUBSCRIBE_HEADERS: [(&str, &str); 2] =
     [("Content-Type", "application/connect+proto"), ("Connect-Protocol-Version", "1")];
+
+/// The Connect path of the engine's publish call, appended to [`engine_url`].
+pub const PUBLISH_PATH: &str = "/v1.V1Streams/Publish";
+/// Headers the (unary) publish request needs (plus `Authorization: Bearer <token>`).
+pub const PUBLISH_HEADERS: [(&str, &str); 2] = [("Content-Type", "application/proto"), ("Connect-Protocol-Version", "1")];
 
 /// The durable stream topic a script is published to.
 pub fn topic(id: &str) -> String {
@@ -40,6 +48,29 @@ pub fn subscribe_body(topic: &str) -> Vec<u8> {
     body.extend_from_slice(&(message.len() as u32).to_be_bytes());
     body.extend(message);
     body
+}
+
+/// The `PublishStreamMessageRequest { topic, payload, producer_id }` body (a unary Connect call
+/// sends the bare message). The engine stores one message per producer id and sequence number
+/// (always 0 here), so a retried task that publishes under the same producer id again adds
+/// nothing.
+pub fn publish_body(topic: &str, producer_id: &str, payload: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(payload.len() + topic.len() + producer_id.len() + 16);
+    for (field, bytes) in [(2u8, topic.as_bytes()), (3, payload), (4, producer_id.as_bytes())] {
+        message.push((field << 3) | 2); // length-delimited
+        put_varint(&mut message, bytes.len() as u64);
+        message.extend_from_slice(bytes);
+    }
+    message
+}
+
+/// The error of a failed unary call, from its JSON body (`{ code, message }`).
+pub fn call_error(status: u16, body: &[u8]) -> String {
+    let end: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    match end.get("message").and_then(|m| m.as_str()) {
+        Some(message) => format!("publish failed ({status}): {message}"),
+        None => format!("publish answered {status}"),
+    }
 }
 
 /// What the response bytes read so far hold.
@@ -176,6 +207,16 @@ mod tests {
         let mut msg = length_delimited(1, &entry);
         msg.extend(length_delimited(3, b"cursor-1"));
         msg
+    }
+
+    #[test]
+    fn encodes_the_publish_request() {
+        let mut want = length_delimited(2, b"t");
+        want.extend(length_delimited(3, b"{}"));
+        want.extend(length_delimited(4, b"p"));
+        assert_eq!(publish_body("t", "p", b"{}"), want);
+        assert_eq!(call_error(400, br#"{"code":"invalid_argument","message":"bad"}"#), "publish failed (400): bad");
+        assert_eq!(call_error(502, b"<html>"), "publish answered 502");
     }
 
     #[test]

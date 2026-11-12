@@ -1,4 +1,4 @@
-import { clientFromContext, hatchet } from '@hatchet-dev/serverless';
+import { clientFromContext, hatchet, TaskRunTerminatedError, type DurableContext } from '@hatchet-dev/serverless';
 import { ScriptWriter } from './describe';
 import { getImage, getScript, putScript } from './scripts';
 import { secret } from './env';
@@ -20,8 +20,9 @@ const VALIDATE_SHAPE = 'validate-shape';
  */
 const RENDER_TASKS = 44;
 /**
- * Most image bytes one task returns (its tiles' packed RGB; base64 adds a third): task outputs
- * travel through Hatchet in one message, so big images get more tasks.
+ * Most image bytes one task publishes (its tiles' packed RGB; base64 adds a third): a task's
+ * tiles go to the render's stream as one message, under the engine's 4 MiB limit, so big images
+ * get more tasks.
  */
 const MAX_TASK_BYTES = 1_500_000;
 /** Description -> script attempts before giving up (the first plus repairs). */
@@ -49,8 +50,8 @@ const DEFAULT_FOV = 39.6;
 
 type Tile = { x: number; y: number; w: number; h: number };
 type Bounds = NonNullable<Validation['bounds']>;
-/** A workflow run's output is keyed by task name. */
-type TilesRunOutput = { [RENDER_TILES]: { tiles: (Tile & { rgb: string })[] } };
+/** A workflow run's output is keyed by task name; a tiles task reports how many it published. */
+type TilesRunOutput = { [RENDER_TILES]: { tiles: number } };
 type Ctx = Parameters<typeof clientFromContext>[0];
 
 const publish = (ctx: Ctx, topic: string, msg: StreamMessage) =>
@@ -62,6 +63,17 @@ async function validate(ctx: Ctx, scriptId: string): Promise<Validation> {
     const out = await ctx.runChild<{ scriptId: string }, { [VALIDATE_SHAPE]: Validation }>(VALIDATE_SHAPE, { scriptId });
     return out[VALIDATE_SHAPE];
   } catch (err) {
+    throw new Error(describe(err));
+  }
+}
+
+/** `validate` for a durable task, whose children go through the durable log. */
+async function validateDurable(ctx: DurableContext<RenderSceneInput>, scriptId: string): Promise<Validation> {
+  try {
+    const out = await ctx.spawnChild<{ scriptId: string }, { [VALIDATE_SHAPE]: Validation }>(VALIDATE_SHAPE, { scriptId });
+    return out[VALIDATE_SHAPE];
+  } catch (err) {
+    if (err instanceof TaskRunTerminatedError) throw err;
     throw new Error(describe(err));
   }
 }
@@ -110,35 +122,50 @@ function frame(camera: Camera, bounds: Bounds, width: number, height: number): C
   return { ...camera, target: center, distance: Math.min(60, Math.max(1, distance * 1.05)) };
 }
 
-/** Run `fn`, publishing `error` if it fails, and `done` if it succeeds and `done` is set. */
+/**
+ * Run `fn`, publishing `error` if it fails, and `done` if it succeeds and `done` is set. A durable
+ * task's eviction isn't a failure (the engine runs it again once its children finish), so it
+ * publishes nothing.
+ */
 async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Promise<T>): Promise<T> {
   try {
     const out = await fn();
     if (done) await publish(ctx, topic, { type: 'done' });
     return out;
   } catch (err) {
-    await publish(ctx, topic, { type: 'error', message: describe(err) }).catch(() => {});
+    if (!(err instanceof TaskRunTerminatedError && err.reason === 'evicted')) {
+      await publish(ctx, topic, { type: 'error', message: describe(err) }).catch(() => {});
+    }
     throw err;
   }
 }
 
 /**
- * Validates the script (and frames the camera on the shape if asked), then fans out one
- * `render-tile` child per tile; the children run on the Rust serverless endpoint. Each finished
- * tile is published to the render's durable stream.
+ * Validates the script (and frames the camera on the shape if asked), then fans out the tiles to
+ * a few `render-tiles` children on the Rust endpoint. Each child publishes its tiles to the
+ * render's durable stream itself, as one `tiles` message, so the page fills in as they finish.
+ *
+ * A durable task: while its children render it gives up its Worker invocation (after the
+ * endpoint's inline wait budget) and the engine runs it again from the top when they're done,
+ * replaying the children's results from its durable log. A render can take minutes, and
+ * Cloudflare sheds Worker requests held that long when renders overlap; a durable task holds
+ * none. Everything before the wait runs again on that replay, so the messages it publishes go
+ * out only on the first invocation.
  */
-export const renderScene = hatchet.task({
+export const renderScene = hatchet.durableTask({
   name: 'render-scene',
   executionTimeout: '60m',
-  fn: async (input: RenderSceneInput, ctx) =>
+  fn: async (input: RenderSceneInput, ctx: DurableContext<RenderSceneInput>) =>
     finishing(ctx, input.topic, true, async () => {
       const { topic, frame: shouldFrame, checked, scriptId, ...params } = input;
+      const first = ctx.invocationCount <= 1;
+      const say = (msg: StreamMessage) => (first ? publish(ctx, topic, msg) : undefined);
 
       // Parse the script once up front, so a typo fails here instead of in every tile.
       let validation = checked;
       if (!validation) {
-        await publish(ctx, topic, { type: 'status', message: 'Checking the shape script…' });
-        validation = await validate(ctx, scriptId);
+        await say({ type: 'status', message: 'Checking the shape script…' });
+        validation = await validateDurable(ctx, scriptId);
       }
       const { bounds } = validation;
       const scriptCamera = validation.camera ?? {};
@@ -149,7 +176,7 @@ export const renderScene = hatchet.task({
         const { target, distance, ...angles } = scriptCamera;
         const framed = frame({ ...params.camera, ...angles }, bounds, params.width, params.height);
         params.camera = { ...framed, ...(target ? { target } : {}), ...(distance ? { distance } : {}) };
-        await publish(ctx, topic, { type: 'camera', camera: params.camera });
+        await say({ type: 'camera', camera: params.camera });
       }
 
       const size = tileSize(params);
@@ -157,8 +184,8 @@ export const renderScene = hatchet.task({
       for (let y = 0; y < params.height; y += size)
         for (let x = 0; x < params.width; x += size)
           tiles.push({ x, y, w: Math.min(size, params.width - x), h: Math.min(size, params.height - y) });
-      await publish(ctx, topic, { type: 'render', tiles: tiles.length, tileSize: size });
-      await publish(ctx, topic, { type: 'status', message: `Rendering ${tiles.length} tiles…` });
+      await say({ type: 'render', tiles: tiles.length, tileSize: size });
+      await say({ type: 'status', message: `Rendering ${tiles.length} tiles…` });
 
       // A few tasks, each with tiles spread over the image (task k takes every n-th tile from
       // the k-th), so they get similar mixes of cheap and costly areas and finish together.
@@ -166,37 +193,19 @@ export const renderScene = hatchet.task({
       const n = Math.min(tiles.length, Math.max(numberVar('RENDER_TASKS', RENDER_TASKS), Math.ceil(bytes / MAX_TASK_BYTES)));
       const tasks = Array.from({ length: n }, (_, k) => tiles.filter((_, i) => i % n === k));
 
-      // When this run is cancelled, cancel every task it spawned, including any whose spawn was
-      // already in flight when the cancellation arrived.
-      const spawned: string[] = [];
-      const cancelTasks = (ids: string[]) =>
-        ids.length
-          ? clientFromContext(ctx).runs.cancel({ ids }).catch((err) => console.error('failed to cancel render tasks', err))
-          : undefined;
-      ctx.abortController.signal.addEventListener('abort', () => cancelTasks(spawned));
-
-      const refs = await ctx.bulkRunNoWaitChildren<typeof params & { tiles: Tile[]; scriptId: string }, TilesRunOutput>(
-        tasks.map((part) => ({ workflow: RENDER_TILES, input: { ...params, tiles: part, scriptId } }))
-      );
-      const ids = await Promise.all(refs.map((ref) => ref.getWorkflowRunId()));
-      spawned.push(...ids);
-      if (ctx.cancelled) {
-        await cancelTasks(ids);
-        throw new Error('render cancelled');
+      // Cancelling the render cancels its children too: the app cancels every run tagged with
+      // the render's id. A child that fails (after its retries) fails the render.
+      let outs: TilesRunOutput[];
+      try {
+        outs = await ctx.spawnChildren<typeof params & { tiles: Tile[]; scriptId: string; topic: string }, TilesRunOutput>(
+          tasks.map((part) => ({ workflow: RENDER_TILES, input: { ...params, tiles: part, scriptId, topic } }))
+        );
+      } catch (err) {
+        if (err instanceof TaskRunTerminatedError) throw err;
+        throw new Error(`a render task failed: ${describe(err)}`);
       }
-      // Each task's tiles go to the stream when it finishes.
-      const done = refs.map((ref, k) =>
-        ref.output.then(async ({ [RENDER_TILES]: out }) => {
-          if (out?.tiles?.length !== tasks[k].length) throw new Error('a render task finished without all its tiles');
-          // All at once: the client batches publishes to a topic, in order.
-          await Promise.all(out.tiles.map((tile) => publish(ctx, topic, { type: 'tile', ...tile })));
-        })
-      );
-
-      const failed = (await Promise.allSettled(done)).filter((r) => r.status === 'rejected');
-      if (failed.length) {
-        throw new Error(`${failed.length} of ${n} render tasks failed: ${describe(failed[0].reason)}`);
-      }
+      const missing = outs.filter((out, k) => out?.[RENDER_TILES]?.tiles !== tasks[k].length).length;
+      if (missing) throw new Error(`${missing} of ${n} render tasks finished without all their tiles`);
       return { tiles: tiles.length };
     }),
 });

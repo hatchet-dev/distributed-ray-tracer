@@ -76,6 +76,28 @@ impl StreamScripts {
 }
 
 impl Scripts for StreamScripts {
+    async fn publish(&self, body: Vec<u8>) -> std::result::Result<(), String> {
+        let token = self.token.as_deref().ok_or("HATCHET_CLIENT_TOKEN is not set")?;
+        let engine = self.engine.as_deref().ok_or("the token has no engine address; set HATCHET_ENGINE_URL")?;
+        let err = |e: Error| e.to_string();
+        let headers = Headers::new();
+        for (name, value) in scripts::PUBLISH_HEADERS {
+            headers.set(name, value).map_err(err)?;
+        }
+        headers.set("Authorization", &format!("Bearer {token}")).map_err(err)?;
+        let body = js_sys::Uint8Array::from(body.as_slice());
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
+        let request = Request::new_with_init(&format!("{engine}{}", scripts::PUBLISH_PATH), &init).map_err(err)?;
+        let mut response = Fetch::Request(request).send().await.map_err(err)?;
+        let status = response.status_code();
+        if status != 200 {
+            let text = response.bytes().await.unwrap_or_default();
+            return Err(scripts::call_error(status, &text));
+        }
+        Ok(())
+    }
+
     async fn get(&self, id: &str) -> std::result::Result<String, String> {
         let cached = CACHE.with_borrow(|c| c.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone()));
         if let Some(script) = cached {

@@ -76,6 +76,8 @@ export type StreamMessage =
   | { type: 'camera'; camera: Camera }
   | { type: 'render'; tiles: number; tileSize: number }
   | { type: 'tile'; x: number; y: number; w: number; h: number; rgb: string }
+  /** A render task's tiles, published by the task itself (crates/endpoint). */
+  | { type: 'tiles'; tiles: { x: number; y: number; w: number; h: number; rgb: string }[] }
   | { type: 'done' }
   | { type: 'error'; message: string };
 
@@ -100,7 +102,34 @@ export function describe(err: unknown, depth = 0): string {
     }
     // Messages built from an inner failure embed it; unwrap that part too.
     const m = err.match(/^(.*?: )(\[.*\])$/s);
-    return m ? m[1] + describe(m[2], depth + 1) : err;
+    return m ? m[1] + describe(m[2], depth + 1) : explain(err);
   }
   return String(err);
+}
+
+/**
+ * Hatchet's delivery failures, in words a viewer can act on. The serverless operator reports a
+ * task whose connection ended early in transport terms; the common causes here are Cloudflare
+ * shedding a long-running Worker request when several renders overlap, and a tile task running
+ * past its endpoint's request timeout.
+ */
+const DELIVERY_ERRORS: [RegExp, string][] = [
+  [
+    /endpoint closed the websocket \(code \d+\) without a done frame|websocket read (?:failed|timed out)[^]*/,
+    'the render was interrupted: Cloudflare stopped the Worker running it, which happens most when several renders run at once. Try again',
+  ],
+  [
+    /(?:request|durable invocation) timed out(?: after [\dhms.]+| without a done frame)/,
+    'the render timed out: its tiles took longer than the server allows. Try fewer samples or a smaller size, or try again when fewer renders are running',
+  ],
+];
+
+function explain(message: string): string {
+  for (const [pattern, text] of DELIVERY_ERRORS) {
+    if (pattern.test(message)) {
+      const out = message.replace(pattern, text);
+      return out.charAt(0).toUpperCase() + out.slice(1);
+    }
+  }
+  return message;
 }

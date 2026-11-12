@@ -94,6 +94,29 @@ impl StreamScripts<'_> {
 }
 
 impl Scripts for StreamScripts<'_> {
+    async fn publish(&self, body: Vec<u8>) -> Result<(), String> {
+        let s = &self.0.settings;
+        let token = s.token.as_deref().ok_or("HATCHET_CLIENT_TOKEN is not set")?;
+        let engine = s.engine.as_deref().ok_or("the token has no engine address; set HATCHET_ENGINE_URL")?;
+        let mut request = self
+            .0
+            .http
+            .post(format!("{engine}{}", scripts::PUBLISH_PATH))
+            .bearer_auth(token)
+            .timeout(SCRIPT_TIMEOUT)
+            .body(body);
+        for (name, value) in scripts::PUBLISH_HEADERS {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        if status != 200 {
+            let text = response.bytes().await.unwrap_or_default();
+            return Err(scripts::call_error(status, &text));
+        }
+        Ok(())
+    }
+
     async fn get(&self, id: &str) -> Result<String, String> {
         let cached = self.0.cache.lock().unwrap().iter().find(|(k, _)| k == id).map(|(_, v)| v.clone());
         if let Some(script) = cached {

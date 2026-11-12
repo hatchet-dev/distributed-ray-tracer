@@ -16,7 +16,7 @@ The renderer itself is a slightly modified version of [rpt](https://github.com/e
 You describe a shape in a chat; a language model writes it as a Fidget (Rhai) script, and a
 `render-scene` workflow fans the image out as a few `render-tiles` tasks (about one per core), each
 rendering tiles spread over the image. Hatchet's serverless operator delivers each task to the Rust
-tile server, and finished tiles stream back to the browser through a durable stream as they complete.
+tile server, and each task publishes its finished tiles to a durable stream that the browser reads.
 
 ```
  browser ──POST /api/render──► app Worker ── runNoWait ──► Hatchet ──► app Worker (/hatchet/*)
@@ -101,7 +101,7 @@ and `GET /healthz` for the platform's health probe; both listen on `PORT` (defau
 docker build -f deploy/tile.Dockerfile -t ray-tile-server .
 
 # The app (Node): HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN, OPENAI_API_KEY
-scripts/build-app.sh      # the preview module and app/dist/server.mjs (see the SDK note)
+scripts/build-app.sh      # the preview module and app/dist/server.mjs
 docker build -f deploy/app.Dockerfile -t ray-tracer-app .
 ```
 
@@ -111,11 +111,6 @@ only needs each endpoint registered with its URL and signing secret.
 
 **Local development:** `pnpm exec wrangler dev` in `app/` serves the page and the render API with the
 secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that Hatchet calls.
-
-**SDK note:** the render API reads the durable stream with `streams.subscribe()` on
-`@hatchet-dev/typescript-sdk/core`, which the published SDK doesn't have yet. Until it ships,
-`app/package.json` links a local SDK build (`link:` to its `dist/`); build it there with
-`pnpm run tsc:build && pnpm run prepublish`.
 
 ## How it works
 
@@ -181,15 +176,21 @@ secrets in `app/.dev.vars`. The workflows still run on the deployed Workers that
   validates it with the endpoint's `validate-shape` task, and on a parse error sends the error back
   to the model to fix it, up to 3 attempts. Then it starts `render-scene` as a child workflow,
   passing the validation result along so the script isn't checked twice, and returns without
-  waiting: a long-lived task can lose its connection, so only the render stays open while tiles run.
-  `render-scene` publishes `done` (or `error`), and the render API watches whichever run is active.
+  waiting. `render-scene` publishes `done` (or `error`), and the render API watches whichever run is active.
+- **Durable render.** `render-scene` is a durable task. While its tiles render it gives up its
+  Worker invocation (after the endpoint's inline wait budget, 5 s by default), and Hatchet runs it
+  again from the top when they finish, replaying the children's results from its durable log. A
+  Worker request held open for a render's minutes gets shed by Cloudflare when renders overlap
+  ("endpoint closed the websocket (code 1006) without a done frame"); an evicted task holds none.
+  Since the task can't watch its children finish, each `render-tiles` task publishes its own tiles
+  (one `tiles` message, under a producer id from its first tile, so a retry adds nothing).
 - **Framing.** `validate-shape` also returns the shape's visible bounding box, computed with Fidget's
   interval arithmetic (it proves regions empty), in ~2 ms. When the shape is new, `render-scene`
   aims the camera at the box's center and pulls back until all 8 corners fit both fields of view,
   keeping the user's orbit angles. Renders after placing the camera in the preview don't reframe,
   and neither does a chat refinement unless it changed the camera the script sets.
 - **Durable streams.** Each render publishes to one Hatchet durable stream topic (`render-<id>`):
-  `status`, `script-delta`, `script`, `camera`, `render`, `tile`, then `done` or `error`. The app
+  `status`, `script-delta`, `script`, `camera`, `render`, `tiles`, then `done` or `error`. The app
   Worker relays the topic to the browser as Server-Sent Events. Durable streams are alpha and
   enabled per tenant.
 - **Tiles.** rpt's `Renderer` only renders whole frames, and its per-pixel functions are private.

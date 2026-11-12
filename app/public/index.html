@@ -969,6 +969,8 @@ async function follow({ kind, turn, width, height, startedAt, connect, resumed =
     // From here it's a render: the Render panel stops it, and the chat is free again.
     if (running === 'chat') setRunning('render'); else refresh();
   });
+  // A render task publishes all its tiles in one `tiles` message (older renders sent `tile`s).
+  on('tiles', (m) => m.tiles.forEach(handlers.tile));
   on('tile', (t) => {
     const bin = atob(t.rgb);
     const img = ctx.createImageData(t.w, t.h);

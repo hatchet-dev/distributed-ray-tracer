@@ -2,14 +2,16 @@
 //!
 //! Serves two tasks:
 //! - `render-tiles`: given render settings, a camera, a shape script and a list of tiles
-//!   (rectangles of pixels), build the scene once and path-trace the tiles, returning them all
-//!   as the task's output. A render is a few of these tasks (about one per core), each with
+//!   (rectangles of pixels), build the scene once and path-trace the tiles, then publish them
+//!   all as one `tiles` message to the render's durable stream topic (or, for an input without a
+//!   `topic`, return them as the task's output). A render is a few of these tasks (about one per core), each with
 //!   tiles spread over the image, so Hatchet hands out a few tasks per render, not one per tile.
 //! - `validate-shape`: parse a shape script, so a bad script fails once, before fan-out.
 //!
 //! Scripts can be megabytes, too big to copy into every task's input, so tasks carry a script's
 //! id (the SHA-256 of its text, in hex) and the adapter supplies a [`Scripts`] store to load it
-//! from: the durable stream topic the app published it to (see [`scripts`]). Adapters (the
+//! from: the durable stream topic the app published it to (see [`scripts`]). The same store
+//! publishes rendered tiles. Adapters (the
 //! native server in `crates/server`, the Cloudflare Worker in `crates/worker`) only move bytes
 //! in and out of [`handle`].
 
@@ -28,6 +30,8 @@ const RENDER: &str = "render-tiles";
 const RENDER_ACTION: &str = "render-tiles:render-tiles";
 /// Tiles one task may carry (a whole 7680x4320 image of 64px tiles is 8160).
 const MAX_TILES_PER_TASK: usize = 8192;
+/// The engine's limit on an inline stream message (4 MiB), less room for the JSON around tiles.
+const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024 - 64 * 1024;
 const VALIDATE: &str = "validate-shape";
 const VALIDATE_ACTION: &str = "validate-shape:validate-shape";
 
@@ -66,12 +70,16 @@ fn error(status: u16, message: impl Into<String>, retry: bool) -> Reply {
     Reply { status, body: error_body(message, retry) }
 }
 
-/// Where task inputs' scripts are loaded from, by id.
+/// The engine's durable streams, as the tasks use them: scripts loaded by id, and rendered
+/// tiles published to a render's topic.
 // The futures needn't be `Send`: adapters await them on the request's own task.
 #[allow(async_fn_in_trait)]
 pub trait Scripts {
     /// The script's text; `Err` if it can't be loaded (retried, so it may be temporary).
     async fn get(&self, id: &str) -> Result<String, String>;
+    /// Publishes `payload` (the body from [`scripts::publish_body`]) to the engine; `Err` if it
+    /// failed (retried, so it may be temporary).
+    async fn publish(&self, body: Vec<u8>) -> Result<(), String>;
 }
 
 /// A script id: the SHA-256 of the script's text, as 64 lowercase hex digits.
@@ -92,6 +100,9 @@ struct TilesInput {
     tiles: Vec<Tile>,
     #[serde(rename = "scriptId")]
     script_id: String,
+    /// The render's stream topic: when set, the tiles are published there instead of returned.
+    #[serde(default)]
+    topic: Option<String>,
 }
 
 /// Loads a task's script, or the reply that fails the task.
@@ -149,7 +160,7 @@ async fn validate(payload: &str, scripts: &impl Scripts) -> Reply {
 }
 
 async fn render(payload: &str, scripts: &impl Scripts) -> Reply {
-    let TilesInput { mut params, tiles, script_id } = match serde_json::from_str::<ActionPayload<TilesInput>>(payload) {
+    let TilesInput { mut params, tiles, script_id, topic } = match serde_json::from_str::<ActionPayload<TilesInput>>(payload) {
         Ok(p) => p.input,
         Err(e) => return error(400, format!("invalid input: {e}"), false),
     };
@@ -176,7 +187,22 @@ async fn render(payload: &str, scripts: &impl Scripts) -> Reply {
     if let Err(e) = rendered {
         return error(400, e, false); // bad script: retrying won't help
     }
-    Reply { status: 200, body: json!({ "tiles": out }) }
+    let Some(topic) = topic else {
+        return Reply { status: 200, body: json!({ "tiles": out }) };
+    };
+
+    // One message for the task's tiles. The producer id is the task's first tile, which no other
+    // task of the render has, so a retry of this task publishes nothing new.
+    let count = out.len();
+    let message = json!({ "type": "tiles", "tiles": out }).to_string();
+    if message.len() > MAX_MESSAGE_BYTES {
+        return error(400, format!("a task's tiles came to {} bytes, over the stream's {MAX_MESSAGE_BYTES}", message.len()), false);
+    }
+    let producer = format!("tiles-{}-{}", tiles[0].x, tiles[0].y);
+    if let Err(e) = scripts.publish(scripts::publish_body(&topic, &producer, message.as_bytes())).await {
+        return error(503, format!("publishing tiles to {topic}: {e}"), true);
+    }
+    Reply { status: 200, body: json!({ "tiles": count }) }
 }
 
 /// The render tasks' concurrency chain; a task runs once it passes every entry, in order.
