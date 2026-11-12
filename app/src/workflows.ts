@@ -51,10 +51,11 @@ const numberVar = (name: string, fallback: number) => {
 /** Matches `CameraParams::default()` in crates/scene. */
 const DEFAULT_FOV = 39.6;
 /**
- * How far past a tight fit framing pulls the camera back: the shape fills about 1/1.35 of the
- * frame, leaving room around it (at 1.05 it filled the frame edge to edge, which read as too close).
+ * How far past a tight fit framing pulls the camera back: the shape fills about 1/1.75 of the
+ * frame, leaving room around it (at 1.05 it filled the frame edge to edge, and 1.35 still read
+ * as too close).
  */
-const FRAME_MARGIN = 1.35;
+const FRAME_MARGIN = 1.75;
 
 type Tile = { x: number; y: number; w: number; h: number };
 type Bounds = NonNullable<Validation['bounds']>;
