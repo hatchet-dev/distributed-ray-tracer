@@ -21,6 +21,10 @@ env:
   MAX_CONCURRENT_TILES: "46"
   # No per-render cap (empty = unset; Porter merges env, so removing the line wouldn't clear it).
   MAX_TILES_PER_RENDER: ""
+  # One browser session's tiles in flight (all its renders), round-robin over sessions: a lone
+  # visitor gets 32 of the 46 slots, and visitors rendering at once share them instead of
+  # queueing behind each other.
+  MAX_TILES_PER_SESSION: "32"
 
 envGroups:
   - ray-tracer-secrets

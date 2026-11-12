@@ -20,13 +20,17 @@ export async function handleApi(req: Request, ctx: Platform): Promise<Response |
     const raw = await req.text();
     if (raw.length > 2 * MAX_SCRIPT_BYTES) return new Response('request too large', { status: 413 });
     let job: Job | string;
+    let sessionId: string | undefined;
     try {
-      job = parseJob(JSON.parse(raw));
+      const body = JSON.parse(raw);
+      job = parseJob(body);
+      // The browser's session (index.html), for the tile server's per-session round-robin.
+      if (typeof body?.sessionId === 'string' && UUID.test(body.sessionId)) sessionId = body.sessionId;
     } catch (err) {
       job = `invalid request: ${describe(err)}`;
     }
     if (typeof job === 'string') return new Response(job, { status: 400 });
-    return render(job, ctx, req.signal);
+    return render(job, ctx, req.signal, sessionId);
   }
   // /api/render/<renderId>: resume (GET) or cancel (POST .../cancel) a render.
   const m = url.pathname.match(/^\/api\/render\/([^/]+)(\/cancel)?$/);
@@ -85,7 +89,7 @@ function cancelRender(hatchet: HatchetCore, renderId: string) {
  * when the browser goes away (the page can come back to it), except before `start` was sent, when
  * nobody could cancel it: then it is cancelled.
  */
-function render(job: Job, ctx: Platform, disconnected: AbortSignal): Response {
+function render(job: Job, ctx: Platform, disconnected: AbortSignal, sessionId?: string): Response {
   const hatchet = hatchetFor();
   const renderId = crypto.randomUUID();
   let started = false;
@@ -93,7 +97,9 @@ function render(job: Job, ctx: Platform, disconnected: AbortSignal): Response {
     if (!started) ctx.waitUntil(cancelRender(hatchet, renderId));
   });
   return relay(hatchet, renderId, ctx, disconnected, async (send) => {
-    const opts = { additionalMetadata: { render_id: renderId } };
+    // Metadata carries over to child runs: the tile server's concurrency keys on both. A request
+    // without a session (e.g. from curl) is its own session.
+    const opts = { additionalMetadata: { render_id: renderId, session_id: sessionId ?? renderId } };
     const ref = await hatchet.runNoWait(workflowFor(job), { ...(await workflowInput(job)), topic: `render-${renderId}` }, opts);
     const runId = await ref.getWorkflowRunId();
     started = !disconnected.aborted;

@@ -820,6 +820,16 @@ function setRunning(kind) {
  * is a chat turn's state: { description, before, beforeGenerated, reply (its index in chat.log), wrote }.
  */
 const LAST = 'ray-tracer-last-render';
+/** This browser's session: the tile server shares its cores round-robin between sessions. */
+const SESSION = (() => {
+  let id = null;
+  try { id = localStorage.getItem('ray-tracer-session'); } catch {}
+  if (!id) {
+    id = crypto.randomUUID();
+    try { localStorage.setItem('ray-tracer-session', id); } catch {}
+  }
+  return id;
+})();
 let last = null;
 try { last = JSON.parse(localStorage.getItem(LAST) || 'null'); } catch {}
 function saveLast() {
@@ -870,7 +880,7 @@ function startRender(job, kind) {
     connect: (signal) => fetch('/api/render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...p, camera, ...job }),
+      body: JSON.stringify({ ...p, camera, ...job, sessionId: SESSION }),
       signal,
     }),
   });
