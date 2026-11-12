@@ -912,7 +912,7 @@ const humanToken = (() => {
   return token;
 })();
 
-/** This browser's session: the tile server shares its cores round-robin between sessions. */
+/** This browser's session: Hatchet runs one render per session at a time (the rest wait). */
 const SESSION = (() => {
   let id = null;
   try { id = localStorage.getItem('ray-tracer-session'); } catch {}

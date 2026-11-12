@@ -16,14 +16,6 @@ build:
 
 env:
   PORT: "8080"
-  # No overall cap on tiles in flight: the service autoscales with load instead (empty = unset;
-  # Porter merges env, so removing the line wouldn't clear it).
-  MAX_CONCURRENT_TILES: ""
-  # No per-render cap.
-  MAX_TILES_PER_RENDER: ""
-  # One browser session's tiles in flight (all its renders), round-robin over sessions, so one
-  # visitor's renders can't take the whole service.
-  MAX_TILES_PER_SESSION: "32"
 
 envGroups:
   - ray-tracer-secrets
@@ -37,7 +29,7 @@ services:
     # A 48-core node: two pods of 22 cores, leaving room for the node's own system pods.
     cpuCores: 22
     ramMegabytes: 8192
-    # Scales with load (there is no overall cap on tiles in flight): a pod is added when average
+    # Scales with load: a pod is added when average
     # CPU use passes 70%, up to 10 pods; at least one stays up.
     autoscaling:
       enabled: true

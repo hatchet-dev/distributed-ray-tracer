@@ -1,4 +1,5 @@
 import { clientFromContext, hatchet, NonRetryableError, TaskRunTerminatedError, type DurableContext } from '@hatchet-dev/serverless';
+import type { ConcurrencyLimitStrategy } from '@hatchet-dev/typescript-sdk/v1';
 import { ScriptWriter } from './describe';
 import { getImage, getScript, putScript } from './scripts';
 import { secret } from './env';
@@ -178,6 +179,15 @@ async function finishing<T>(ctx: Ctx, topic: string, done: boolean, fn: () => Pr
 export const renderScene = hatchet.durableTask({
   name: 'render-scene',
   executionTimeout: '60m',
+  // One render at a time per browser session (the `session_id` the app tags every run with):
+  // a session's next render waits in Hatchet's queue until its current one finishes.
+  concurrency: {
+    expression: "has(additional_metadata.session_id) ? additional_metadata.session_id : 'none'",
+    maxRuns: 1,
+    // GROUP_ROUND_ROBIN (queue), not the default CANCEL_IN_PROGRESS. The enum's value: the SDK's
+    // edge build (what a Worker bundles) doesn't export it.
+    limitStrategy: 3 as ConcurrencyLimitStrategy,
+  },
   fn: async (input: RenderSceneInput, ctx: DurableContext<RenderSceneInput>) =>
     finishing(ctx, input.topic, true, async () => {
       const { topic, frame: shouldFrame, checked, scriptId, ...params } = input;

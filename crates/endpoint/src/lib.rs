@@ -40,16 +40,6 @@ pub struct Config<'a> {
     pub endpoint_id: Option<&'a str>,
     /// Shown on the endpoint in the Hatchet dashboard.
     pub runtime_name: &'a str,
-    /// Optional cap on render tasks running at once across all renders, declared to Hatchet as
-    /// workflow concurrency so the excess waits in Hatchet's queue. A task renders on one core,
-    /// so about the renderer's total cores. `None` = no overall cap.
-    pub max_concurrent_tiles: Option<u32>,
-    /// Optional cap on one render's tasks running at once, so a render can't take every slot
-    /// from the others. `None` = no per-render cap.
-    pub max_tiles_per_render: Option<u32>,
-    /// Optional cap on one browser session's tasks running at once (all its renders), so one
-    /// visitor can't take every slot from the others. `None` = no per-session cap.
-    pub max_tiles_per_session: Option<u32>,
     /// Whether this endpoint renders tiles. When another endpoint (e.g. the native server)
     /// renders them, this one declares only `validate-shape`, so Hatchet sends it no tiles.
     pub serve_render: bool,
@@ -208,32 +198,8 @@ async fn render(payload: &str, scripts: &impl Scripts) -> Reply {
     Reply { status: 200, body: json!({ "tiles": count }) }
 }
 
-/// The render tasks' concurrency chain; a task runs once it passes every entry, in order.
-/// 0. Per session (round-robin over sessions): one browser session's tasks in flight, keyed by
-///    the `session_id` the app tags every run with, so visitors share the slots.
-/// 1. Per render (round-robin over renders): one render's tasks in flight, keyed by the
-///    `render_id` the app tags every run with (metadata propagates to children). Tasks of
-///    several renders then share the slots instead of the oldest render taking all of them.
-/// 2. Overall: every task of every render, so the renderer's machines aren't oversubscribed.
-fn tile_concurrency(cfg: &Config) -> Option<Value> {
-    let rr = "GROUP_ROUND_ROBIN";
-    let mut chain = vec![];
-    if let Some(max_runs) = cfg.max_tiles_per_session {
-        let key = "has(additional_metadata.session_id) ? additional_metadata.session_id : 'none'";
-        chain.push(json!({ "expression": key, "maxRuns": max_runs, "limitStrategy": rr }));
-    }
-    if let Some(max_runs) = cfg.max_tiles_per_render {
-        let key = "has(additional_metadata.render_id) ? additional_metadata.render_id : 'none'";
-        chain.push(json!({ "expression": key, "maxRuns": max_runs, "limitStrategy": rr }));
-    }
-    if let Some(max_runs) = cfg.max_concurrent_tiles {
-        chain.push(json!({ "expression": "'tiles'", "maxRuns": max_runs, "limitStrategy": rr }));
-    }
-    (!chain.is_empty()).then(|| Value::Array(chain))
-}
-
 fn healthcheck(cfg: &Config) -> Value {
-    let mut render = json!({
+    let render = json!({
         "name": RENDER,
         "description": "Path-trace tiles of a user-scripted scene",
         // 5xx responses (including Cloudflare's own, e.g. CPU-limit kills under load) are
@@ -246,9 +212,6 @@ fn healthcheck(cfg: &Config) -> Value {
             "retries": 8, "backoffFactor": 2.0, "backoffMaxSeconds": 30,
         }],
     });
-    if let Some(chain) = tile_concurrency(cfg) {
-        render["concurrencyArr"] = chain;
-    }
     let validate = json!({
         "name": VALIDATE,
         "description": "Check that a shape script parses",

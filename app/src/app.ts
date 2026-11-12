@@ -27,7 +27,7 @@ export async function handleApi(req: Request, ctx: Platform): Promise<Response |
     try {
       body = JSON.parse(raw);
       job = parseJob(body);
-      // The browser's session (index.html), for the tile server's per-session round-robin.
+      // The browser's session (index.html): render-scene runs one render per session at a time.
       if (typeof body?.sessionId === 'string' && UUID.test(body.sessionId)) sessionId = body.sessionId;
     } catch (err) {
       job = `invalid request: ${describe(err)}`;
@@ -102,7 +102,8 @@ function render(job: Job, ctx: Platform, disconnected: AbortSignal, sessionId?: 
     if (!started) ctx.waitUntil(cancelRender(hatchet, renderId));
   });
   return relay(hatchet, renderId, ctx, disconnected, async (send) => {
-    // Metadata carries over to child runs: the tile server's concurrency keys on both. A request
+    // Metadata carries over to child runs: cancelling keys on render_id, and render-scene's
+    // concurrency (one render per session) on session_id. A request
     // without a session (e.g. from curl) is its own session.
     const opts = { additionalMetadata: { render_id: renderId, session_id: sessionId ?? renderId } };
     const ref = await hatchet.runNoWait(workflowFor(job), { ...(await workflowInput(job)), topic: `render-${renderId}` }, opts);
