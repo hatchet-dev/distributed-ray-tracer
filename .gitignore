@@ -5,6 +5,8 @@ node_modules/
 .DS_Store
 *.png
 !docs/*.png
+# The page's icons and social preview image.
+!app/public/*.png
 
 # Secrets, wherever they are: never commit these.
 .env
