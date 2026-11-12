@@ -34,11 +34,11 @@ services:
     cpuCores: 22
     ramMegabytes: 153600
     # Scales with load: a pod is added when average
-    # CPU use passes 70%, up to 10 pods; at least one stays up.
+    # CPU use passes 70%, up to 30 pods; at least one stays up.
     autoscaling:
       enabled: true
       minInstances: 1
-      maxInstances: 10
+      maxInstances: 30
       cpuThresholdPercent: 70
     healthCheck:
       enabled: true
