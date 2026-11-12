@@ -50,6 +50,11 @@ const numberVar = (name: string, fallback: number) => {
 };
 /** Matches `CameraParams::default()` in crates/scene. */
 const DEFAULT_FOV = 39.6;
+/**
+ * How far past a tight fit framing pulls the camera back: the shape fills about 1/1.35 of the
+ * frame, leaving room around it (at 1.05 it filled the frame edge to edge, which read as too close).
+ */
+const FRAME_MARGIN = 1.35;
 
 type Tile = { x: number; y: number; w: number; h: number };
 type Bounds = NonNullable<Validation['bounds']>;
@@ -140,7 +145,7 @@ function frame(camera: Camera, bounds: Bounds, width: number, height: number): C
     const depth = dot(p, fwd);
     distance = Math.max(distance, depth + Math.abs(dot(p, right)) / tanX, depth + Math.abs(dot(p, up)) / tanY);
   }
-  return { ...camera, target: center, distance: Math.min(60, Math.max(1, distance * 1.05)) };
+  return { ...camera, target: center, distance: Math.min(60, Math.max(1, distance * FRAME_MARGIN)) };
 }
 
 /**
