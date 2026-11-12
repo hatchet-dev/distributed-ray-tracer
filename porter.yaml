@@ -29,10 +29,9 @@ services:
     run: ray-tile-server
     port: 8080
     # Each pod renders about as many tiles at once as it has cores.
-    # A 48-core, 384 GB node: two pods of 22 cores and 150 GB each, leaving room for a 32 GB
-    # chat pod and the node's own system pods.
+    # A 48-core node: two pods of 22 cores, leaving room for the node's own system pods.
     cpuCores: 22
-    ramMegabytes: 153600
+    ramMegabytes: 32768
     # Scales with load: a pod is added when average
     # CPU use passes 70%, up to 30 pods; at least one stays up.
     autoscaling:
