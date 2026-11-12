@@ -27,6 +27,12 @@ watch_dir = "../crates"
 # Fan-out mostly waits on children (no CPU), but leave headroom for large renders.
 cpu_ms = 300000
 
+# Workers Logs: keeps every invocation's outcome and console output (searchable in the dashboard
+# under Workers & Pages > this Worker > Logs), so a shed or failed invocation can be looked up
+# after the fact instead of only while `wrangler tail` runs.
+[observability]
+enabled = true
+
 # Secrets (`wrangler secret put`; `.dev.vars` under `wrangler dev`):
 #   HATCHET_CLIENT_TOKEN    tenant API token: starting, cancelling and reading runs and streams
 #   HATCHET_SIGNING_SECRET  >= 32 chars, also given to Hatchet when registering the endpoint

@@ -924,6 +924,8 @@ const SESSION = (() => {
 })();
 let last = null;
 try { last = JSON.parse(localStorage.getItem(LAST) || 'null'); } catch {}
+// A new visitor (no render and no chat stored here yet) gets "What is this?" first.
+if (!last && !chat.history.length) openAbout();
 function saveLast() {
   try { last ? localStorage.setItem(LAST, JSON.stringify(last)) : localStorage.removeItem(LAST); } catch {}
 }

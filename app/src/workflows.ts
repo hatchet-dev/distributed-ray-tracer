@@ -253,9 +253,11 @@ export const describeAndRender = hatchet.task({
   name: 'describe-and-render',
   executionTimeout: '60m',
   // Cloudflare occasionally sheds the Worker invocation mid model call (it reports a websocket that
-  // closed without a done frame); Hatchet then runs the task again. Failures the task reports
-  // itself are not retried (see `finishing`).
-  retries: 2,
+  // closed without a done frame); Hatchet then runs the task again. Sheds come in bursts, so the
+  // retries back off (4 s, 16 s, 60 s) instead of landing in the same one. Failures the task
+  // reports itself are not retried (see `finishing`).
+  retries: 3,
+  backoff: { factor: 4, maxSeconds: 60 },
   fn: async (input: DescribeInput, ctx) =>
     // The render finishes the stream (render-scene publishes `done`); this only reports failures.
     finishing(ctx, input.topic, false, async () => {
