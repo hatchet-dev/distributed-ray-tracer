@@ -6,8 +6,20 @@ import { cloudflare, type HatchetEnv } from '@hatchet-dev/serverless/cloudflare'
 import { handleApi } from './app';
 import { workflows } from './workflows';
 
-export default cloudflare<HatchetEnv>({
+/** A Workers rate limiting binding (`[[ratelimits]]` in wrangler.toml). */
+interface RateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+type Env = HatchetEnv & { RENDER_LIMITER?: RateLimiter; CHAT_LIMITER?: RateLimiter };
+
+export default cloudflare<Env>({
   workflows,
-  fetch: async (req, _env, ctx) =>
-    (await handleApi(req, { waitUntil: (p) => ctx.waitUntil(p) })) ?? new Response('Not Found', { status: 404 }),
+  fetch: async (req, env, ctx) =>
+    (await handleApi(req, {
+      waitUntil: (p) => ctx.waitUntil(p),
+      rateLimit: async (limiter, key) => {
+        const binding = limiter === 'chat' ? env.CHAT_LIMITER : env.RENDER_LIMITER;
+        return binding ? (await binding.limit({ key })).success : true;
+      },
+    })) ?? new Response('Not Found', { status: 404 }),
 });

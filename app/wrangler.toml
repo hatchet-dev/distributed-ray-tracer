@@ -32,3 +32,20 @@ cpu_ms = 300000
 #   HATCHET_SIGNING_SECRET  >= 32 chars, also given to Hatchet when registering the endpoint
 #   OPENAI_API_KEY          shape-script generation
 
+# Abuse guards for POST /api/render (src/guard.ts), per client IP. Every render counts against
+# RENDER_LIMITER; chat turns (which also call the model) count against CHAT_LIMITER too. A period
+# is 10 or 60 seconds; namespace_id is any number unique to this account.
+[[ratelimits]]
+name = "RENDER_LIMITER"
+namespace_id = "1001"
+simple = { limit = 8, period = 60 }
+
+[[ratelimits]]
+name = "CHAT_LIMITER"
+namespace_id = "1002"
+simple = { limit = 4, period = 60 }
+
+# Cloudflare Turnstile on renders: the widget's site key (public) here, and its secret key as the
+# TURNSTILE_SECRET_KEY secret. Without the secret, renders aren't checked.
+[vars]
+TURNSTILE_SITE_KEY = ""

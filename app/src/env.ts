@@ -11,4 +11,9 @@ export const secret = (name: string): string | undefined => {
 export interface Platform {
   /** Keeps work going after the response is returned (Cloudflare's ctx.waitUntil). */
   waitUntil(promise: Promise<unknown>): void;
+  /**
+   * Counts one request against a rate limit for `key` (the client's IP) and reports whether
+   * it's allowed. Absent where the platform has no rate limiter (the Node server, local dev).
+   */
+  rateLimit?(limiter: 'render' | 'chat', key: string): Promise<boolean>;
 }

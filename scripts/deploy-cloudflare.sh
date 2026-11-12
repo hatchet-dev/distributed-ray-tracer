@@ -11,7 +11,8 @@
 #                signing secret, in the tenant HATCHET_CLIENT_TOKEN belongs to
 #   --no-secrets deploy the code only
 #
-# Secrets uploaded (when present): HATCHET_CLIENT_TOKEN, HATCHET_SIGNING_SECRET, OPENAI_API_KEY.
+# Secrets uploaded (when present): HATCHET_CLIENT_TOKEN, HATCHET_SIGNING_SECRET, OPENAI_API_KEY,
+# TURNSTILE_SECRET_KEY.
 # Values are never printed.
 #
 # Which Cloudflare account: whatever `wrangler login` is signed into, or set CLOUDFLARE_ACCOUNT_ID
@@ -22,7 +23,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 
-SECRETS=(HATCHET_CLIENT_TOKEN HATCHET_SIGNING_SECRET OPENAI_API_KEY)
+SECRETS=(HATCHET_CLIENT_TOKEN HATCHET_SIGNING_SECRET OPENAI_API_KEY TURNSTILE_SECRET_KEY)
 ENDPOINT_NAME=ray-tracer-app
 env_files=()
 register=""

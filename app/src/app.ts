@@ -11,18 +11,21 @@ import { MAX_SCRIPT_BYTES, parseJob, workflowFor, type Job } from './jobs';
 import { imageType, MAX_IMAGE_BYTES, putImage, putScript } from './scripts';
 import { describe, type StreamMessage } from './messages';
 import { secret, type Platform } from './env';
+import { guardRender, pageConfig } from './guard';
 
 /** Answers an API request, or null when the path isn't part of the API. */
 export async function handleApi(req: Request, ctx: Platform): Promise<Response | null> {
   const url = new URL(req.url);
+  if (req.method === 'GET' && url.pathname === '/api/config') return pageConfig();
   if (req.method === 'POST' && url.pathname === '/api/images') return uploadImage(req);
   if (req.method === 'POST' && url.pathname === '/api/render') {
     const raw = await req.text();
     if (raw.length > 2 * MAX_SCRIPT_BYTES) return new Response('request too large', { status: 413 });
     let job: Job | string;
+    let body: Record<string, unknown> = {};
     let sessionId: string | undefined;
     try {
-      const body = JSON.parse(raw);
+      body = JSON.parse(raw);
       job = parseJob(body);
       // The browser's session (index.html), for the tile server's per-session round-robin.
       if (typeof body?.sessionId === 'string' && UUID.test(body.sessionId)) sessionId = body.sessionId;
@@ -30,6 +33,8 @@ export async function handleApi(req: Request, ctx: Platform): Promise<Response |
       job = `invalid request: ${describe(err)}`;
     }
     if (typeof job === 'string') return new Response(job, { status: 400 });
+    const refused = await guardRender(req, body, 'description' in job, ctx);
+    if (refused) return refused;
     return render(job, ctx, req.signal, sessionId);
   }
   // /api/render/<renderId>: resume (GET) or cancel (POST .../cancel) a render.

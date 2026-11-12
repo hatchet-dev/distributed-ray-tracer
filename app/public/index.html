@@ -218,6 +218,7 @@
   .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .15s; box-shadow: 0 0 8px var(--accent); }
 
   /* "What is this?" */
+  #turnstile { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 20; }
   #about { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 64px); padding: 22px 24px; color: var(--text);
            font: 13px/1.6 var(--mono); position: fixed; overflow: auto; }
   #about::backdrop { background: rgba(2, 8, 29, 0.72); backdrop-filter: blur(3px); }
@@ -393,6 +394,9 @@
 
 <button id="toggle-ui" type="button" title="Hide or show the controls (H)">Hide UI</button>
 <div class="bar"><div id="progress"></div></div>
+
+<!-- Cloudflare Turnstile's bot check for renders: invisible unless it needs the visitor. -->
+<div id="turnstile"></div>
 
 <!-- "What is this?": the text is copy.md, loaded when the modal opens. -->
 <dialog id="about" class="panel" aria-label="What is this?">
@@ -838,6 +842,45 @@ function setRunning(kind) {
  * is a chat turn's state: { description, before, beforeGenerated, reply (its index in chat.log), wrote }.
  */
 const LAST = 'ray-tracer-last-render';
+/**
+ * A fresh Turnstile token for one render (tokens are single-use), or undefined when the server
+ * doesn't check (GET /api/config has no site key). The widget renders once and is reset per use;
+ * it stays invisible unless Cloudflare wants the visitor to click.
+ */
+const humanToken = (() => {
+  let ready = null, widget = null, waiting = null;
+  const load = () => (ready ??= fetch('/api/config').then((r) => r.json()).then(({ turnstileSiteKey: sitekey }) => {
+    if (!sitekey) return false;
+    return new Promise((resolve, reject) => {
+      const tag = document.createElement('script');
+      tag.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      tag.async = true;
+      tag.onload = () => {
+        widget = turnstile.render('#turnstile', {
+          sitekey, execution: 'execute', appearance: 'interaction-only',
+          callback: (token) => { waiting?.resolve(token); waiting = null; },
+          'error-callback': () => { waiting?.reject(new Error('The bot check failed. Reload the page and try again.')); waiting = null; },
+        });
+        resolve(true);
+      };
+      tag.onerror = () => reject(new Error("Couldn't load the bot check. Check your connection and try again."));
+      document.head.append(tag);
+    });
+  }).catch((err) => { ready = null; throw err; }));
+  const token = async () => {
+    if (!(await load())) return undefined;
+    return new Promise((resolve, reject) => {
+      waiting = { resolve, reject };
+      turnstile.reset(widget);
+      turnstile.execute(widget);
+    });
+  };
+  // Load the widget with the page (no token yet: they're single-use and expire in 5 minutes),
+  // so the first render doesn't wait for the script.
+  load().catch(() => {});
+  return token;
+})();
+
 /** This browser's session: the tile server shares its cores round-robin between sessions. */
 const SESSION = (() => {
   let id = null;
@@ -895,10 +938,10 @@ function startRender(job, kind) {
   }
   follow({
     kind, turn, width: p.width, height: p.height, startedAt: Date.now(),
-    connect: (signal) => fetch('/api/render', {
+    connect: async (signal) => fetch('/api/render', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...p, camera, ...job, sessionId: SESSION }),
+      body: JSON.stringify({ ...p, camera, ...job, sessionId: SESSION, turnstileToken: await humanToken() }),
       signal,
     }),
   });
