@@ -1,4 +1,4 @@
-# One image for both Porter services (porter.yaml): the Rust tile server (`ray-tile-server`) and
+# One image for both Porter apps (porter.yaml, porter.app.yaml): the Rust tile server (`ray-tile-server`) and
 # the Node app that serves the orchestration workflows (`node /app/server.mjs`). Porter builds one
 # image per app, so both live here; each service runs its own command.
 #   docker build -f deploy/porter.Dockerfile -t ray-tracer .

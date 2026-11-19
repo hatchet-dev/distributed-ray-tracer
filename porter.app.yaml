@@ -1,0 +1,46 @@
+# Porter app "app": the Node app (app/src/node.ts), serving the orchestration workflows
+# (describe-and-render, render-scene) under /hatchet: the same ones the Cloudflare Worker serves.
+# Register it with Hatchet as a second endpoint (ray-tracer-app-porter) and enable whichever of
+# the two should take them. The page and render API stay on the Worker.
+# Same image and env group as porter.yaml.
+# Deployed by .github/workflows/porter-app-6445-app.yml (porter apply -f porter.app.yaml).
+version: v2
+name: app
+
+build:
+  method: docker
+  context: .
+  dockerfile: ./deploy/porter.Dockerfile
+
+env:
+  PORT: "8080"
+
+envGroups:
+  - ray-tracer-secrets
+
+services:
+  - name: chat
+    type: web
+    # Node's heap is capped at a few GB by default whatever the pod has; let it use 28 of the
+    # pod's 32 GB, leaving the rest for buffers and native memory.
+    run: node --max-old-space-size=28672 /app/server.mjs
+    port: 8080
+    # Model calls and orchestration: mostly waiting on the network, so few cores.
+    cpuCores: 2
+    ramMegabytes: 32768
+    autoscaling:
+      enabled: true
+      minInstances: 1
+      maxInstances: 4
+      cpuThresholdPercent: 70
+    healthCheck:
+      enabled: true
+      httpPath: /healthz
+      timeoutSeconds: 2
+      initialDelaySeconds: 5
+    ingressAnnotations:
+      # Hatchet holds a websocket per task for up to the endpoint's request timeout; keep
+      # ingress-nginx from cutting it at its 60 s default.
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    terminationGracePeriodSeconds: 330

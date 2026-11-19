@@ -1,14 +1,11 @@
-# Two services from one image (deploy/porter.Dockerfile):
-# - web: the tile renderer (crates/server: render-tiles, validate-shape).
-# - chat: the Node app (app/src/node.ts), serving the orchestration workflows (describe-and-render,
-#   render-scene) under /hatchet: the same ones the Cloudflare Worker serves. Register it with
-#   Hatchet as a second endpoint and enable whichever of the two should take them. The page and
-#   render API stay on the Worker.
+# Porter app "worker": the Rust tile renderer (crates/server: render-tiles, validate-shape).
+# Built from deploy/porter.Dockerfile, which also holds the Node app run by porter.app.yaml.
 #
 # Secrets go in a Porter environment group, created before the first deploy:
 #   ray-tracer-secrets: HATCHET_SIGNING_SECRET, HATCHET_CLIENT_TOKEN, OPENAI_API_KEY
-# Register each service's https://<domain>/hatchet/healthcheck and /hatchet/trigger with Hatchet
-# as a GENERIC_HTTP endpoint (requestTimeoutSeconds >= 300).
+# Register https://<domain>/hatchet/healthcheck and /hatchet/trigger with Hatchet as a
+# GENERIC_HTTP endpoint (requestTimeoutSeconds >= 300).
+# Deployed by .github/workflows/porter-app-6445-worker.yml (porter apply -f porter.yaml).
 version: v2
 name: worker
 
@@ -48,30 +45,4 @@ services:
       # A tile may take up to the task's 300 s timeout; ingress-nginx cuts requests at 60 s by default.
       nginx.ingress.kubernetes.io/proxy-read-timeout: "330"
       nginx.ingress.kubernetes.io/proxy-send-timeout: "330"
-    terminationGracePeriodSeconds: 330
-
-  - name: chat
-    type: web
-    # Node's heap is capped at a few GB by default whatever the pod has; let it use 28 of the
-    # pod's 32 GB, leaving the rest for buffers and native memory.
-    run: node --max-old-space-size=28672 /app/server.mjs
-    port: 8080
-    # Model calls and orchestration: mostly waiting on the network, so few cores.
-    cpuCores: 2
-    ramMegabytes: 32768
-    autoscaling:
-      enabled: true
-      minInstances: 1
-      maxInstances: 4
-      cpuThresholdPercent: 70
-    healthCheck:
-      enabled: true
-      httpPath: /healthz
-      timeoutSeconds: 2
-      initialDelaySeconds: 5
-    ingressAnnotations:
-      # Hatchet holds a websocket per task for up to the endpoint's request timeout; keep
-      # ingress-nginx from cutting it at its 60 s default.
-      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     terminationGracePeriodSeconds: 330

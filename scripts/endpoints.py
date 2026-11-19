@@ -7,7 +7,7 @@
                                                   CLOUDFLARE_WORKERS; BASE: https://host/hatchet)
 
 The app's workflows (describe-and-render, render-scene) are served by two endpoints:
-ray-tracer-app (the Cloudflare Worker) and ray-tracer-app-porter (porter.yaml's chat service).
+ray-tracer-app (the Cloudflare Worker) and ray-tracer-app-porter (porter.app.yaml's chat service).
 Keep one enabled: e.g. `disable ray-tracer-app && enable ray-tracer-app-porter`.
 """
 import base64, json, os, ssl, sys, urllib.request, urllib.error
